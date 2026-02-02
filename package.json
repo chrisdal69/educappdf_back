@@ -4,7 +4,8 @@
   "private": true,
   "scripts": {
     "start": "nodemon ./bin/www",
-    "migrate:cards-content": "node ./scripts/migrate-cards-content.js"
+    "migrate:cards-content": "node ./scripts/migrate-cards-content.js",
+    "test:auth:manual": "node ./scripts/test-auth-manual.js"
   },
   "dependencies": {
     "@google-cloud/storage": "^7.17.1",

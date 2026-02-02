@@ -67,3 +67,4 @@ config/
 cors
 
 scripts/migrate-cards-content.js
+scripts/test-auth-manual.js

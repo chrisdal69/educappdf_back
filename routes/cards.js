@@ -65,6 +65,13 @@ const allowedFileExtensions = new Set([
 const allowedFlashImageExtensions = new Set([".jpg", ".jpeg", ".png"]);
 const MAX_FLASH_IMAGE_BYTES = 4 * 1024 * 1024;
 const MAX_FILE_BYTES = 100 * 1024 * 1024;
+const stripSpacesAndAccents = (value) => {
+  if (typeof value !== "string") return "";
+  return value
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/\s+/g, "");
+};
 const toBlurFileName = (filename) => {
   if (!filename || typeof filename !== "string") {
     return null;
@@ -286,9 +293,12 @@ router.delete("/cloud/:id", authenticate, async (req, res) => {
 router.post("/cloud", requireAdmin, async (req, res) => {
   const { id_card, nom, prenom, message, filename } = req.body || {};
   const trimmedCard = typeof id_card === "string" ? id_card.trim() : "";
-  const trimmedNom = typeof nom === "string" ? nom.trim().toUpperCase() : "";
+  const trimmedNom =
+    typeof nom === "string" ? stripSpacesAndAccents(nom).toUpperCase().trim() : "";
   const trimmedPrenom =
-    typeof prenom === "string" ? prenom.trim().toLowerCase() : "";
+    typeof prenom === "string"
+      ? stripSpacesAndAccents(prenom).toLowerCase().trim()
+      : "";
   const trimmedMessage = typeof message === "string" ? message.trim() : "";
   const trimmedFilename =
     typeof filename === "string" ? filename.trim() : "";

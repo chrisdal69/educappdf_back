@@ -98,7 +98,7 @@ router.post("/signup", async (req, res) => {
   nom = nom.toUpperCase().trim();
   prenom = removeSpaces(prenom)
   prenom = prenom.toLowerCase().trim();
-  email = email.toLowerCase().trim();
+  email = typeof email === "string" ? email.toLowerCase().trim() : "";
   try {
     // 1️⃣ Validation des données avec Yup
     await signupSchema.validate(
@@ -172,7 +172,7 @@ router.post("/signup", async (req, res) => {
 
 router.post("/verifmail", async (req, res) => {
   let { email, code } = req.body;
-  email = email.toLowerCase().trim();
+  email = typeof email === "string" ? email.toLowerCase().trim() : "";
 
   try {
     // 1️⃣ Validation des données avec Yup
@@ -182,7 +182,7 @@ router.post("/verifmail", async (req, res) => {
     );
 
     // 2️⃣ Lecture du code dans la bdd Mongoose
-    const user = await User.findOne({ email });
+    const user = await User.findOne({ email }).select("+confirm +confirmExpires");
 
     if (!user) {
       return res
@@ -213,7 +213,7 @@ router.post("/verifmail", async (req, res) => {
     await User.updateOne(
       { email },
       {
-        $set: { isVerified: true, confirm: "", confirmExpires: "" },
+        $set: { isVerified: true, confirm: "", confirmExpires: null },
       }
     );
     return res
@@ -235,7 +235,7 @@ router.post("/verifmail", async (req, res) => {
 
 router.post("/resend-code", async (req, res) => {
   let { email } = req.body;
-  email = email.toLowerCase().trim();
+  email = typeof email === "string" ? email.toLowerCase().trim() : "";
 
   try {
     // 1️⃣ Vérifie que l’email est fourni
@@ -316,7 +316,7 @@ const loginSchema = yup.object().shape({
 });
 router.post("/login", async (req, res) => {
   let { email, password } = req.body;
-  email = email.toLowerCase().trim();
+  email = typeof email === "string" ? email.toLowerCase().trim() : "";
 
   try {
     // 1- Validation des données avec Yup
@@ -325,11 +325,12 @@ router.post("/login", async (req, res) => {
       { abortEarly: false } // pour obtenir toutes les erreurs à la fois
     );
     // 2- Recherche dans la base de données de l'utilisateur et validation pass
-    const data = await User.findOne({ email });
+    const data = await User.findOne({ email }).select("+password");
     if (
       !data ||
       !bcrypt.compareSync(password, data.password) ||
-      !data.isVerified
+      !data.isVerified ||
+      data.active === false
     ) {
       return res
         .status(401)
@@ -413,7 +414,8 @@ const verifmailcodepassSchema = yup.object().shape({
   code: yup.string().required("Le code est obligatoire"),
 });
 router.post("/forgot", async (req, res) => {
-  const { email } = req.body;
+  let { email } = req.body;
+  email = typeof email === "string" ? email.toLowerCase().trim() : "";
   try {
     // 1️⃣ Validation des données avec Yup
     await verifmailSchema.validate(
@@ -480,7 +482,8 @@ router.post("/forgot", async (req, res) => {
 });
 
 router.post("/resend-forgot", async (req, res) => {
-  const { email } = req.body;
+  let { email } = req.body;
+  email = typeof email === "string" ? email.toLowerCase().trim() : "";
 
   try {
     // 1️⃣ Vérifie que l’email est fourni
@@ -541,7 +544,8 @@ router.post("/resend-forgot", async (req, res) => {
 });
 
 router.post("/reset-password", async (req, res) => {
-  const { email, code, newPassword } = req.body;
+  let { email, code, newPassword } = req.body;
+  email = typeof email === "string" ? email.toLowerCase().trim() : "";
   try {
     // 1️⃣ Validation des données avec Yup
     await verifmailcodepassSchema.validate(
@@ -550,7 +554,7 @@ router.post("/reset-password", async (req, res) => {
     );
 
     // 2️⃣ Lecture du code dans la bdd Mongoose
-    const user = await User.findOne({ email });
+    const user = await User.findOne({ email }).select("+confirm +confirmExpires");
     if (!user) {
       return res
         .status(400)
@@ -578,7 +582,7 @@ router.post("/reset-password", async (req, res) => {
         $set: {
           password: hashedPassword,
           confirm: "",
-          confirmExpires: "",
+          confirmExpires: null,
         },
       }
     );
