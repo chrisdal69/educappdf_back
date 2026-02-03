@@ -3,6 +3,8 @@ var router = express.Router();
 const jwt = require("jsonwebtoken");
 const yup = require("yup");
 const User = require("../models/users");
+const Classe = require("../models/classes");
+
 const bcrypt = require("bcrypt");
 const nodemailer = require("nodemailer");
 
@@ -325,7 +327,7 @@ router.post("/login", async (req, res) => {
       { abortEarly: false } // pour obtenir toutes les erreurs à la fois
     );
     // 2- Recherche dans la base de données de l'utilisateur et validation pass
-    const data = await User.findOne({ email }).select("+password");
+    const data = await User.findOne({ email , active:true }).select("+password");
     if (
       !data ||
       !bcrypt.compareSync(password, data.password) ||
@@ -336,34 +338,59 @@ router.post("/login", async (req, res) => {
         .status(401)
         .json({ message: "Compte inexistant ou non vérifié" });
     }
-    // 3. Génère le JWT access et l'envoie dans un cookie httpOnly
 
-    const accessToken = jwt.sign(
-      {
-        userId: data._id,
-        email: data.email,
-        nom: data.nom,
-        prenom: data.prenom,
-        role: data.role,
-      }, // 👈 ajout du rôle
-      process.env.ACCESS_TOKEN_SECRET,
-      { expiresIn: "1h" }
+    // 3. Interroge la collection Classe
+    const teachersClasses = await Classe.find({ teacher: data._id , active:true }).select(
+      "_id name"
     );
+    const followedClasses = await Classe.find({
+      _id: { $in: data.follow || [] }, active:true
+    }).select("_id name");
 
-    res.cookie("jwt", accessToken, {
-      httpOnly: true, // Le cookie n'est pas accessible via JavaScript
-      secure: process.env.NODE_ENV === "production",
-      sameSite: process.env.NODE_ENV === "production" ? "none" : "lax",
-      // pas de maxAge => cookie supprimé à la fermeture de l'onglet
-    });
+    const teacherClassesSummary = teachersClasses.map((cl) => ({
+      id: cl._id,
+      name: cl.name,
+    }));
+    const followedClassesSummary = followedClasses.map((cl) => ({
+      id: cl._id,
+      name: cl.name,
+    }));
 
     return res.json({
-      message: "Connexion réussie",
-      email: data.email,
-      nom: data.nom,
-      prenom: data.prenom,
-      role: data.role,
+      message: "Classes suivies",
+      teachersClasses: teacherClassesSummary,
+      followedClasses: followedClassesSummary,
     });
+
+
+    // // 3. Génère le JWT access et l'envoie dans un cookie httpOnly
+
+    // const accessToken = jwt.sign(
+    //   {
+    //     userId: data._id,
+    //     email: data.email,
+    //     nom: data.nom,
+    //     prenom: data.prenom,
+    //     role: data.role,
+    //   }, // 👈 ajout du rôle
+    //   process.env.ACCESS_TOKEN_SECRET,
+    //   { expiresIn: "1h" }
+    // );
+
+    // res.cookie("jwt", accessToken, {
+    //   httpOnly: true, // Le cookie n'est pas accessible via JavaScript
+    //   secure: process.env.NODE_ENV === "production",
+    //   sameSite: process.env.NODE_ENV === "production" ? "none" : "lax",
+    //   // pas de maxAge => cookie supprimé à la fermeture de l'onglet
+    // });
+
+    // return res.json({
+    //   message: "Connexion réussie",
+    //   email: data.email,
+    //   nom: data.nom,
+    //   prenom: data.prenom,
+    //   role: data.role,
+    // });
   } catch (error) {
     // Gestion des erreurs de validation Yup
     if (error.name === "ValidationError") {

@@ -42,4 +42,4 @@ const classeSchema = new mongoose.Schema({
   active: { type: Boolean, default: true },
 });
 
-module.exports = mongoose.model("Class", classeSchema);
+module.exports = mongoose.model("Classe", classeSchema);
