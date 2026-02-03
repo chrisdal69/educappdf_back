@@ -316,18 +316,35 @@ const loginSchema = yup.object().shape({
     .matches(/[^A-Za-z0-9]/, "Un caractère spécial est requis")
     .required("Mot de passe obligatoire"),
 });
+
+const selectClassSchema = yup.object().shape({
+  classId: yup
+    .string()
+    .trim()
+    .matches(/^[0-9a-fA-F]{24}$/, "Identifiant de classe invalide")
+    .required("La classe est obligatoire"),
+});
+
+const buildCookieOptions = (maxAge) => ({
+  httpOnly: true,
+  secure: process.env.NODE_ENV === "production",
+  sameSite: process.env.NODE_ENV === "production" ? "none" : "lax",
+  ...(maxAge ? { maxAge } : {}),
+});
+
 router.post("/login", async (req, res) => {
   let { email, password } = req.body;
   email = typeof email === "string" ? email.toLowerCase().trim() : "";
 
   try {
-    // 1- Validation des données avec Yup
+    // 1- Validation des donnees avec Yup
     await loginSchema.validate(
       { email, password },
-      { abortEarly: false } // pour obtenir toutes les erreurs à la fois
+      { abortEarly: false } // pour obtenir toutes les erreurs a la fois
     );
-    // 2- Recherche dans la base de données de l'utilisateur et validation pass
-    const data = await User.findOne({ email , active:true }).select("+password");
+
+    // 2- Recherche dans la base de donnees de l'utilisateur et validation pass
+    const data = await User.findOne({ email, active: true }).select("+password");
     if (
       !data ||
       !bcrypt.compareSync(password, data.password) ||
@@ -340,57 +357,55 @@ router.post("/login", async (req, res) => {
     }
 
     // 3. Interroge la collection Classe
-    const teachersClasses = await Classe.find({ teacher: data._id , active:true }).select(
-      "_id name"
-    );
+    const teachersClasses = await Classe.find({
+      teacher: data._id,
+      active: true,
+    }).select("_id name");
+
     const followedClasses = await Classe.find({
-      _id: { $in: data.follow || [] }, active:true
+      _id: { $in: data.follow || [] },
+      active: true,
     }).select("_id name");
 
     const teacherClassesSummary = teachersClasses.map((cl) => ({
       id: cl._id,
       name: cl.name,
     }));
+
     const followedClassesSummary = followedClasses.map((cl) => ({
       id: cl._id,
       name: cl.name,
     }));
 
+    const totalClasses =
+      teacherClassesSummary.length + followedClassesSummary.length;
+
+    if (totalClasses === 0) {
+      res.clearCookie("pending_login", buildCookieOptions());
+      return res.json({
+        message: "Cet utilisateur n'est inscrit à aucun cours",
+        teachersClasses: [],
+        followedClasses: [],
+      });
+    }
+
+    const pendingLoginToken = jwt.sign(
+      {
+        userId: data._id.toString(),
+        email: data.email,
+        purpose: "class_selection",
+      },
+      process.env.ACCESS_TOKEN_SECRET,
+      { expiresIn: "10m" }
+    );
+
+    res.cookie("pending_login", pendingLoginToken, buildCookieOptions(600000));
+
     return res.json({
-      message: "Classes suivies",
+      message: "Choisissez une classe",
       teachersClasses: teacherClassesSummary,
       followedClasses: followedClassesSummary,
     });
-
-
-    // // 3. Génère le JWT access et l'envoie dans un cookie httpOnly
-
-    // const accessToken = jwt.sign(
-    //   {
-    //     userId: data._id,
-    //     email: data.email,
-    //     nom: data.nom,
-    //     prenom: data.prenom,
-    //     role: data.role,
-    //   }, // 👈 ajout du rôle
-    //   process.env.ACCESS_TOKEN_SECRET,
-    //   { expiresIn: "1h" }
-    // );
-
-    // res.cookie("jwt", accessToken, {
-    //   httpOnly: true, // Le cookie n'est pas accessible via JavaScript
-    //   secure: process.env.NODE_ENV === "production",
-    //   sameSite: process.env.NODE_ENV === "production" ? "none" : "lax",
-    //   // pas de maxAge => cookie supprimé à la fermeture de l'onglet
-    // });
-
-    // return res.json({
-    //   message: "Connexion réussie",
-    //   email: data.email,
-    //   nom: data.nom,
-    //   prenom: data.prenom,
-    //   role: data.role,
-    // });
   } catch (error) {
     // Gestion des erreurs de validation Yup
     if (error.name === "ValidationError") {
@@ -405,11 +420,113 @@ router.post("/login", async (req, res) => {
   }
 });
 
+router.post("/login/select-class", async (req, res) => {
+  let { classId } = req.body;
+  classId = typeof classId === "string" ? classId.trim() : "";
+
+  try {
+    await selectClassSchema.validate(
+      { classId },
+      { abortEarly: false } // pour obtenir toutes les erreurs a la fois
+    );
+
+    const pendingToken = req.cookies.pending_login;
+    if (!pendingToken) {
+      return res.status(401).json({ message: "Session de connexion expirée" });
+    }
+
+    const pendingPayload = jwt.verify(
+      pendingToken,
+      process.env.ACCESS_TOKEN_SECRET
+    );
+
+    if (pendingPayload.purpose !== "class_selection") {
+      return res.status(403).json({ message: "Session de connexion invalide" });
+    }
+
+    const user = await User.findById(pendingPayload.userId);
+    if (!user || !user.isVerified || user.active === false) {
+      return res.status(401).json({ message: "Compte inexistant ou non vérifié" });
+    }
+
+    const selectedClass = await Classe.findOne({
+      _id: classId,
+      active: true,
+    }).select("_id name directory tabs teacher");
+
+    if (!selectedClass) {
+      return res.status(404).json({ message: "Classe introuvable" });
+    }
+
+    const isTeacher =
+      selectedClass.teacher &&
+      selectedClass.teacher.toString() === user._id.toString();
+
+    const isFollower =
+      Array.isArray(user.follow) &&
+      user.follow.some((id) => id.toString() === selectedClass._id.toString());
+
+    if (!isTeacher && !isFollower) {
+      return res.status(403).json({ message: "Classe non autorisée" });
+    }
+
+    const role = isTeacher ? "admin" : "user";
+
+    const accessToken = jwt.sign(
+      {
+        userId: user._id,
+        email: user.email,
+        nom: user.nom,
+        prenom: user.prenom,
+        role,
+        classId: selectedClass._id,
+        name: selectedClass.name,
+        directory: selectedClass.directory,
+        tabs: selectedClass.tabs,
+      },
+      process.env.ACCESS_TOKEN_SECRET,
+      { expiresIn: "1h" }
+    );
+
+    res.cookie("jwt", accessToken, buildCookieOptions());
+    res.clearCookie("pending_login", buildCookieOptions());
+
+    return res.json({
+      message: "Connexion réussie",
+      email: user.email,
+      nom: user.nom,
+      prenom: user.prenom,
+      role,
+      classId: selectedClass._id,
+      name: selectedClass.name,
+      directory: selectedClass.directory,
+      tabs: selectedClass.tabs,
+    });
+  } catch (error) {
+    if (error.name === "ValidationError") {
+      const validationErrors = error.inner.map((err) => ({
+        field: err.path,
+        message: err.message,
+      }));
+      return res.status(400).json({ errors: validationErrors });
+    }
+
+    if (error.name === "TokenExpiredError") {
+      res.clearCookie("pending_login", buildCookieOptions());
+      return res.status(401).json({ message: "Session de connexion expirée" });
+    }
+
+    console.error("Erreur lors de la validation de classe :", error);
+    return res.status(500).json({ error: "Erreur interne du serveur" });
+  }
+});
+
 /* FIN LOGIN */
 /************************************************************************* */
 /* DEBUT LOGOUT */
 router.post("/logout", async (req, res) => {
   res.clearCookie("jwt");
+  res.clearCookie("pending_login");
   return res.json({ message: "Déconnexion réussie" });
 });
 
