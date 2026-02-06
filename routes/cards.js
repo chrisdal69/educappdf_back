@@ -83,16 +83,28 @@ const toBlurFileName = (filename) => {
   return `${filename.slice(0, lastDot)}Blur${filename.slice(lastDot)}`;
 };
 
+const parseClassObjectId = (value) => {
+  if (value instanceof mongoose.Types.ObjectId) {
+    return value;
+  }
+  if (value == null) return null;
+  const trimmed = String(value).trim();
+  if (!mongoose.Types.ObjectId.isValid(trimmed)) return null;
+  return new mongoose.Types.ObjectId(trimmed);
+};
+
 router.get("/", async (req, res) => {
+  const classObjectId = parseClassObjectId(req.query?.classId);
+
+  if (!classObjectId) {
+    return res.status(400).json({ error: "Id de classe manquant ou invalide." });
+  }
+
   try {
-    const result = await Card.find({ visible: true })
+    const result = await Card.find({ visible: true, classe: classObjectId })
       .sort({ order: -1 })
       .lean()
       .exec();
-
-    if (!result.length) {
-      return res.status(404).json({ error: "Aucune carte trouvée." });
-    }
 
     const sanitized = result.map((card) => {
       const filteredFiles = Array.isArray(card.fichiers)
@@ -129,12 +141,16 @@ router.get("/", async (req, res) => {
 });
 
 router.get("/admin", requireAdmin, async (req, res) => {
-  try {
-    const result = await Card.find().sort({ order: -1 }).lean().exec();
+  const classObjectId = parseClassObjectId(req.user?.classId);
+  if (!classObjectId) {
+    return res.status(400).json({ error: "Classe administrateur invalide." });
+  }
 
-    if (!result.length) {
-      return res.status(404).json({ error: "Aucune carte trouvée." });
-    }
+  try {
+    const result = await Card.find({ classe: classObjectId })
+      .sort({ order: -1 })
+      .lean()
+      .exec();
 
     res.json({ result });
   } catch (err) {
@@ -145,15 +161,19 @@ router.get("/admin", requireAdmin, async (req, res) => {
 
 router.post("/admin", requireAdmin, async (req, res) => {
   const repertoire = (req.body?.repertoire || "").trim();
+  const classObjectId = parseClassObjectId(req.user?.classId);
 
   if (!repertoire) {
     return res.status(400).json({ error: "Repertoire manquant." });
+  }
+  if (!classObjectId) {
+    return res.status(400).json({ error: "Classe administrateur invalide." });
   }
 
   try {
     const computeNextValues = async () => {
       const [agg] = await Card.aggregate([
-        { $match: { repertoire } },
+        { $match: { repertoire, classe: classObjectId } },
         {
           $group: {
             _id: null,
@@ -179,6 +199,7 @@ router.post("/admin", requireAdmin, async (req, res) => {
       const payload = {
         num: values.nextNum,
         repertoire,
+        classe: classObjectId,
         cloud: false,
         bg: "",
         titre: "",
@@ -512,7 +533,9 @@ router.patch("/:id/move", requireAdmin, async (req, res) => {
       return res.status(404).json({ error: "Carte introuvable." });
     }
 
-    const filter = { repertoire: current.repertoire };
+    const filter = current.classe
+      ? { repertoire: current.repertoire, classe: current.classe }
+      : { repertoire: current.repertoire, classe: { $exists: false } };
     const sorted = await Card.find(filter).sort({ order: -1, num: -1 }).lean();
 
     const index = sorted.findIndex((c) => String(c._id) === String(id));

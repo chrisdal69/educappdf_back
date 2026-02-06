@@ -39,9 +39,10 @@ const cardSchema = new mongoose.Schema({
   resultatQuizz:Boolean,
   visible:Boolean,
   order:Number,
+  classe:{ type: mongoose.Schema.Types.ObjectId, ref: "Classe" }
 });
 
-cardSchema.index({ repertoire: 1, num: 1 }, { unique: true });
-cardSchema.index({ repertoire: 1, order: 1 }, { unique: true });
+cardSchema.index({ classe: 1, repertoire: 1, num: 1 }, { unique: true });
+cardSchema.index({ classe: 1, repertoire: 1, order: 1 }, { unique: true });
 
 module.exports = mongoose.model("Card", cardSchema);
