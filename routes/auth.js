@@ -458,9 +458,12 @@ router.post("/login/select-class", async (req, res) => {
       return res.status(404).json({ message: "Classe introuvable" });
     }
 
-    const isTeacher =
-      selectedClass.teacher &&
-      selectedClass.teacher.toString() === user._id.toString();
+    const isTeacher = Array.isArray(selectedClass.teacher)
+      ? selectedClass.teacher.some(
+          (id) => id && id.toString() === user._id.toString()
+        )
+      : selectedClass.teacher &&
+        selectedClass.teacher.toString() === user._id.toString();
 
     const isFollower =
       Array.isArray(user.follow) &&
