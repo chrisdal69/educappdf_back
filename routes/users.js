@@ -1,22 +1,20 @@
 const express = require("express");
 const router = express.Router();
 const { authenticate, authorize } = require("../middlewares/auth");
+const mongoose = require("mongoose");
 const User = require("../models/users");
 const yup = require("yup");
 const bcrypt = require("bcrypt");
 
-
 /* DEBUT info utilisateur */
 router.get("/me", authenticate, (req, res) => {
   const { email, nom, prenom, role } = req.user;
-  console.log("email, nom, prenom, role : ",email, nom, prenom, role)
+  console.log("email, nom, prenom, role : ", email, nom, prenom, role);
   res.json({ email, nom, prenom, role });
 });
 /* FIN info utilisateur */
 
-
 /************************************************************************* */
-
 
 /* DEBUT Changepassword */
 const schema = yup.object().shape({
@@ -31,7 +29,7 @@ const schema = yup.object().shape({
 });
 router.post("/change-password", authenticate, async (req, res) => {
   const { newPassword } = req.body;
-  console.log("etape 1 : ",newPassword);
+  console.log("etape 1 : ", newPassword);
   try {
     // Vérifie la présence du nouveau mot de passe
     if (!newPassword || newPassword.length < 8) {
@@ -42,14 +40,14 @@ router.post("/change-password", authenticate, async (req, res) => {
       { newPassword },
       { abortEarly: false } // pour obtenir toutes les erreurs à la fois
     );
-    console.log("etape 2 : ",newPassword);
+    console.log("etape 2 : ", newPassword);
 
     // Récupère l’utilisateur connecté via req.user.userId
     const user = await User.findById(req.user.userId);
     if (!user) {
       return res.status(404).json({ error: "Utilisateur introuvable." });
     }
-    console.log("etape 3 : ",user);
+    console.log("etape 3 : ", user);
 
     // Hash le nouveau mot de passe
     const hashed = await bcrypt.hash(newPassword, 10);
@@ -76,5 +74,79 @@ router.post("/change-password", authenticate, async (req, res) => {
   }
 });
 /* FIN Changepassword */
+
+/* DEBUT leave class (unfollow) */
+const leaveClassSchema = yup.object().shape({
+  classId: yup
+    .string()
+    .trim()
+    .matches(/^[0-9a-fA-F]{24}$/, "Identifiant de classe invalide")
+    .required("La classe est obligatoire"),
+});
+
+router.post("/leave-class", authenticate, async (req, res) => {
+  let { classId } = req.body || {};
+  classId = typeof classId === "string" ? classId.trim() : "";
+  try {
+    await leaveClassSchema.validate({ classId }, { abortEarly: false });
+
+    const userId = req.user?.userId;
+    if (!userId) {
+      return res.status(401).json({ message: "Utilisateur non authentifié." });
+    }
+
+    
+
+    const pullCandidates = [classId];
+    const lower = classId.toLowerCase();
+    if (lower !== classId) {
+      pullCandidates.push(lower);
+    }
+    if (mongoose.Types.ObjectId.isValid(classId)) {
+      pullCandidates.push(new mongoose.Types.ObjectId(classId));
+    }
+
+    const userObjectId = mongoose.Types.ObjectId.isValid(userId)
+      ? new mongoose.Types.ObjectId(userId)
+      : null;
+
+    if (!userObjectId) {
+      return res.status(401).json({ message: "Token invalide." });
+    }
+
+    // Utiliser le driver natif pour éviter le casting Mongoose sur `follow`.
+    const updateResult = await User.collection.updateOne(
+      { _id: userObjectId },
+      { $pull: { follow: { $in: pullCandidates } } }
+    );
+
+    const matched = updateResult?.matchedCount ?? updateResult?.n ?? 0;
+    const modified = updateResult?.modifiedCount ?? updateResult?.nModified ?? 0;
+
+    if (!matched) {
+      return res.status(404).json({ message: "Utilisateur introuvable." });
+    }
+
+    if (!modified) {
+      return res
+        .status(400)
+        .json({ message: "Impossible de se désinscrire de cette classe" });
+    }
+
+    return res.status(200).json({ message: "Désinscription réalisée" });
+  } catch (error) {
+    if (error.name === "ValidationError") {
+      const validationErrors = error.inner.map((err) => ({
+        field: err.path,
+        message: err.message,
+      }));
+      return res.status(400).json({ errors: validationErrors });
+    }
+
+    console.error("Erreur leave-class :", error);
+    return res.status(500).json({ message: "Erreur serveur." });
+  }
+});
+/* FIN leave class (unfollow) */
 
 module.exports = router;

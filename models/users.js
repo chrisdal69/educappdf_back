@@ -9,8 +9,8 @@ const userSchema = new mongoose.Schema({
   isVerified: { type: Boolean, default: false },
   confirm: { type: String, default: "", select: false }, // code hashé
   confirmExpires: { type: Date, default: null, select: false },
-  role: { type: String, enum: ["user", "admin", "superadmin"], default: "user" },
-  follow: { type: [String], default: [] },
+  role: { type: String, enum: ["eleve", "prof"], default: "eleve" },
+  follow: { type: [{ type: mongoose.Schema.Types.ObjectId, ref: "Classe" }], default: [] },
   active: { type: Boolean, default: true },
 });
 
