@@ -3,8 +3,15 @@ const router = express.Router();
 const { authenticate, authorize } = require("../middlewares/auth");
 const mongoose = require("mongoose");
 const User = require("../models/users");
+const Classe = require("../models/classes");
 const yup = require("yup");
 const bcrypt = require("bcrypt");
+
+const buildCookieOptions = () => ({
+  httpOnly: true,
+  secure: process.env.NODE_ENV === "production",
+  sameSite: process.env.NODE_ENV === "production" ? "none" : "lax",
+});
 
 /* DEBUT info utilisateur */
 router.get("/me", authenticate, (req, res) => {
@@ -148,5 +155,42 @@ router.post("/leave-class", authenticate, async (req, res) => {
   }
 });
 /* FIN leave class (unfollow) */
+
+/* DEBUT delete account */
+router.post("/delete-account", authenticate, async (req, res) => {
+  try {
+    const userId = req.user?.userId;
+    const userObjectId = mongoose.Types.ObjectId.isValid(userId)
+      ? new mongoose.Types.ObjectId(userId)
+      : null;
+
+    if (!userObjectId) {
+      return res.status(401).json({ message: "Token invalide." });
+    }
+
+    const isTeacher = await Classe.exists({ teacher: userObjectId });
+    if (isTeacher) {
+      return res
+        .status(403)
+        .json({ message: "Impossible pour un professeur de se désinscrire" });
+    }
+
+    const deletion = await User.deleteOne({ _id: userObjectId });
+    const deleted =
+      deletion?.deletedCount ?? deletion?.n ?? deletion?.nRemoved ?? 0;
+
+    if (!deleted) {
+      return res.status(400).json({ message: "Désinscription impossible" });
+    }
+
+    res.clearCookie("jwt", buildCookieOptions());
+    res.clearCookie("pending_login", buildCookieOptions());
+    return res.status(200).json({ message: "Suppression de compte réalisée" });
+  } catch (error) {
+    console.error("Erreur delete-account :", error);
+    return res.status(500).json({ message: "Désinscription impossible" });
+  }
+});
+/* FIN delete account */
 
 module.exports = router;
