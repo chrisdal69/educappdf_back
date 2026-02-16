@@ -390,24 +390,24 @@ router.post("/login", async (req, res) => {
     const classes = await Classe.find({
       _id: { $in: allClassIds },
       active: true,
-    }).select("_id name");
+    }).select("_id publicname");
 
     const classNameById = new Map(
-      classes.map((cl) => [cl._id.toString(), cl.name])
+      classes.map((cl) => [cl._id.toString(), cl.publicname])
     );
 
     const teacherClassesSummary = [...adminClassIds]
       .filter((id) => classNameById.has(id))
       .map((id) => ({
         id,
-        name: classNameById.get(id) || "Classe sans nom",
+        publicname: classNameById.get(id) || "Classe sans nom",
       }));
 
     const followedClassesSummary = [...userClassIds]
       .filter((id) => classNameById.has(id))
       .map((id) => ({
         id,
-        name: classNameById.get(id) || "Classe sans nom",
+        publicname: classNameById.get(id) || "Classe sans nom",
       }));
 
     const totalClasses =
@@ -485,7 +485,7 @@ router.post("/login/select-class", async (req, res) => {
     const selectedClass = await Classe.findOne({
       _id: classId,
       active: true,
-    }).select("_id name directory tabs");
+    }).select("_id publicname directoryname repertoires");
 
     if (!selectedClass) {
       return res.status(404).json({ message: "Classe introuvable" });
@@ -520,9 +520,9 @@ router.post("/login/select-class", async (req, res) => {
         prenom: user.prenom,
         role,
         classId: selectedClass._id,
-        name: selectedClass.name,
-        directory: selectedClass.directory,
-        tabs: selectedClass.tabs,
+        publicname: selectedClass.publicname,
+        directoryname: selectedClass.directoryname,
+        repertoires: selectedClass.repertoires,
       },
       process.env.ACCESS_TOKEN_SECRET,
       { expiresIn: "1h" }
@@ -538,9 +538,9 @@ router.post("/login/select-class", async (req, res) => {
       prenom: user.prenom,
       role,
       classId: selectedClass._id,
-      name: selectedClass.name,
-      directory: selectedClass.directory,
-      tabs: selectedClass.tabs,
+      publicname: selectedClass.publicname,
+      directoryname: selectedClass.directoryname,
+      repertoires: selectedClass.repertoires,
     });
   } catch (error) {
     if (error.name === "ValidationError") {

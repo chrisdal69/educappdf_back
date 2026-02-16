@@ -25,17 +25,16 @@ const studentSchema = new mongoose.Schema({
 });
 
 const classeSchema = new mongoose.Schema({
-
-  directory: {
+  directoryname: {
     type: String,
     unique: true,
     required: true,
     trim: true,
     lowercase: true,
   },
-  name: { type: String, required: true, trim: true },
+  publicname: { type: String, required: true, trim: true },
   date: { type: Date, default: Date.now },
-  tabs: { type: [String], default: [] },
+  repertoires: { type: [String], default: [] },
   code: { type: String, default: "", select: false },
   codeExpires: { type: Date, default: null, select: false },
   students: { type: [studentSchema], default: [] },
