@@ -5,7 +5,12 @@
   "scripts": {
     "start": "nodemon ./bin/www",
     "migrate:cards-content": "node ./scripts/migrate-cards-content.js",
-    "test:auth:manual": "node ./scripts/test-auth-manual.js"
+    "test:auth:manual": "node ./scripts/test-auth-manual.js",
+    "test": "jest"
+  },
+  "devDependencies": {
+    "jest": "^30.2.0",
+    "supertest": "^7.2.2"
   },
   "dependencies": {
     "@google-cloud/storage": "^7.17.1",

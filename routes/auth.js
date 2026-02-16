@@ -444,19 +444,6 @@ router.post("/signup/create", async (req, res) => {
 
     await newUser.save();
 
-    const claim = await claimStudentSlot({
-      classId,
-      nom: rawNom,
-      prenom: rawPrenom,
-      userObjectId: newUser._id,
-    });
-    if (!claim.ok) {
-      await User.deleteOne({ _id: newUser._id }).catch(() => {});
-      return res
-        .status(409)
-        .json({ message: "Cette place n'est plus disponible.", redirect: true });
-    }
-
     return res
       .status(201)
       .json({ sendMail: true, email, infoMail: info.messageId });
