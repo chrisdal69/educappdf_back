@@ -22,6 +22,12 @@ const studentSchema = new mongoose.Schema({
     required: true,
     set: normalizeLowerNoAccent,
   },
+  free: { type: Boolean, select: true },
+  id_user: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: "User",
+    default: null,
+  },
 });
 
 const classeSchema = new mongoose.Schema({

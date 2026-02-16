@@ -149,6 +149,19 @@ router.post("/leave-class", authenticate, async (req, res) => {
         .json({ message: "Impossible de se désinscrire de cette classe" });
     }
 
+    await Classe.updateOne(
+      { _id: classObjectId },
+      {
+        $set: {
+          "students.$[st].free": true,
+          "students.$[st].id_user": null,
+        },
+      },
+      { arrayFilters: [{ "st.id_user": userObjectId }] }
+    ).catch((err) => {
+      console.error("Erreur libération student slot :", err);
+    });
+
     return res.status(200).json({ message: "Désinscription réalisée" });
   } catch (error) {
     if (error.name === "ValidationError") {
@@ -177,11 +190,47 @@ router.post("/delete-account", authenticate, async (req, res) => {
       return res.status(401).json({ message: "Token invalide." });
     }
 
-    const isTeacher = await Classe.exists({ teacher: userObjectId });
+    const isTeacher = await User.exists({
+      _id: userObjectId,
+      follow: { $elemMatch: { role: "admin" } },
+    });
     if (isTeacher) {
       return res
         .status(403)
         .json({ message: "Impossible pour un professeur de se désinscrire" });
+    }
+
+    const rawUser = await User.collection.findOne(
+      { _id: userObjectId },
+      { projection: { follow: 1 } }
+    );
+    const follow = Array.isArray(rawUser?.follow) ? rawUser.follow : [];
+    const classObjectIds = follow
+      .map((entry) => {
+        if (!entry) return null;
+        if (typeof entry === "string") {
+          return mongoose.Types.ObjectId.isValid(entry)
+            ? new mongoose.Types.ObjectId(entry)
+            : null;
+        }
+        const id = entry?.classe ?? entry;
+        return id && mongoose.Types.ObjectId.isValid(id)
+          ? new mongoose.Types.ObjectId(id)
+          : null;
+      })
+      .filter(Boolean);
+
+    if (classObjectIds.length) {
+      await Classe.updateMany(
+        { _id: { $in: classObjectIds } },
+        {
+          $set: {
+            "students.$[st].free": true,
+            "students.$[st].id_user": null,
+          },
+        },
+        { arrayFilters: [{ "st.id_user": userObjectId }] }
+      );
     }
 
     const deletion = await User.deleteOne({ _id: userObjectId });

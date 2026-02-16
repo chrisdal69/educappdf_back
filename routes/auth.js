@@ -2,6 +2,7 @@ const express = require("express");
 var router = express.Router();
 const jwt = require("jsonwebtoken");
 const yup = require("yup");
+const mongoose = require("mongoose");
 const User = require("../models/users");
 const Classe = require("../models/classes");
 
@@ -93,6 +94,535 @@ function removeSpaces(str) {
   );
 }
 
+function normalizeNoAccentNoSpaces(value) {
+  if (typeof value !== "string") return "";
+  return value
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/\s+/g, "")
+    .trim();
+}
+
+function normalizeNom(rawNom) {
+  return normalizeNoAccentNoSpaces(rawNom).toUpperCase();
+}
+
+function normalizePrenom(rawPrenom) {
+  return normalizeNoAccentNoSpaces(rawPrenom).toLowerCase();
+}
+
+const teacherCodeSchema = yup.object().shape({
+  code: yup
+    .string()
+    .trim()
+    .matches(/^[A-Za-z0-9]{4}$/, "Code professeur invalide")
+    .required("Le code professeur est obligatoire"),
+});
+
+const signupTeacherCodeSchema = yup.object().shape({
+  classId: yup
+    .string()
+    .trim()
+    .matches(/^[0-9a-fA-F]{24}$/, "Identifiant de classe invalide")
+    .required("La classe est obligatoire"),
+  nom: yup
+    .string()
+    .trim()
+    .min(2, "Le nom doit contenir au moins 2 caractÃ¨res")
+    .matches(nameRegex, "Lettres, espaces, - ou _ uniquement")
+    .required("Le nom est obligatoire"),
+  prenom: yup
+    .string()
+    .trim()
+    .min(2, "Le prÃ©nom doit contenir au moins 2 caractÃ¨res")
+    .matches(nameRegex, "Lettres, espaces, - ou _ uniquement")
+    .required("Le prÃ©nom est obligatoire"),
+  email: yup
+    .string()
+    .trim()
+    .email("Adresse email invalide")
+    .required("L'email est obligatoire"),
+});
+
+const signupCreateSchema = signupTeacherCodeSchema.shape({
+  password: yup
+    .string()
+    .min(8, "8 caractÃ¨res minimum")
+    .matches(/[A-Z]/, "Une majuscule est requise")
+    .matches(/[a-z]/, "Une minuscule est requise")
+    .matches(/[0-9]/, "Un chiffre est requis")
+    .matches(/[^A-Za-z0-9]/, "Un caractÃ¨re spÃ©cial est requis")
+    .required("Mot de passe obligatoire"),
+  confirmPassword: yup
+    .string()
+    .oneOf([yup.ref("password"), null], "Les mots de passe ne correspondent pas")
+    .required("Confirmez votre mot de passe"),
+});
+
+const signupJoinExistingSchema = signupTeacherCodeSchema.shape({
+  password: yup.string().required("Mot de passe obligatoire"),
+});
+
+async function getActiveClassByTeacherCode(rawCode) {
+  const trimmed = typeof rawCode === "string" ? rawCode.trim() : "";
+  const candidates = [trimmed];
+  const upper = trimmed.toUpperCase();
+  const lower = trimmed.toLowerCase();
+  if (upper && upper !== trimmed) candidates.push(upper);
+  if (lower && lower !== trimmed && lower !== upper) candidates.push(lower);
+
+  return Classe.findOne({
+    code: { $in: candidates },
+    codeExpires: { $gt: new Date() },
+    active: true,
+  }).select("_id students");
+}
+
+async function ensureStudentInClass({ classId, nom, prenom, userObjectId = null }) {
+  const classObjectId =
+    classId && mongoose.Types.ObjectId.isValid(classId)
+      ? new mongoose.Types.ObjectId(classId)
+      : null;
+
+  if (!classObjectId) {
+    return { ok: false, message: "Ce code n'est pas ou n'est plus valide" };
+  }
+
+  const normalizedNom = normalizeNom(nom);
+  const normalizedPrenom = normalizePrenom(prenom);
+
+  const classe = await Classe.findOne({
+    _id: classObjectId,
+    codeExpires: { $gt: new Date() },
+    active: true,
+  })
+    .select("_id students")
+    .lean();
+
+  if (!classe) {
+    return { ok: false, message: "Ce code n'est pas ou n'est plus valide" };
+  }
+
+  const students = Array.isArray(classe.students) ? classe.students : [];
+  const studentIndex = students.findIndex((st) => {
+    const stNom = normalizeNom(st?.nom || "");
+    const stPrenom = normalizePrenom(st?.prenom || "");
+    return stNom === normalizedNom && stPrenom === normalizedPrenom;
+  });
+  const matchedStudent = studentIndex >= 0 ? students[studentIndex] : null;
+
+  if (!matchedStudent) {
+    return {
+      ok: false,
+      message:
+        "Nom et prenom non reconnus pour ce code professeur. En informer votre professeur.",
+    };
+  }
+
+  const isFree = matchedStudent?.free !== false;
+  const idUserIsNull = matchedStudent?.id_user == null;
+  const idUserMatches =
+    userObjectId &&
+    matchedStudent?.id_user &&
+    matchedStudent.id_user.toString() === userObjectId.toString();
+
+  const canUse = userObjectId
+    ? idUserMatches || (isFree && idUserIsNull)
+    : isFree && idUserIsNull;
+
+  if (!canUse) {
+    return {
+      ok: false,
+      message: "Cette place n'est plus disponible. En informer votre professeur.",
+    };
+  }
+
+  return {
+    ok: true,
+    classObjectId,
+    normalizedNom,
+    normalizedPrenom,
+    studentSubId: matchedStudent?._id || null,
+    studentStoredNom: matchedStudent?.nom ?? null,
+    studentStoredPrenom: matchedStudent?.prenom ?? null,
+    studentIndex,
+  };
+}
+
+async function claimStudentSlot({
+  classId,
+  nom,
+  prenom,
+  userObjectId,
+  studentSubId = null,
+  studentIndex = null,
+}) {
+  if (!userObjectId) {
+    return { ok: false, message: "Ce code n'est pas ou n'est plus valide" };
+  }
+
+  const check = await ensureStudentInClass({ classId, nom, prenom, userObjectId });
+  if (!check.ok) return check;
+
+  const classObjectId = check.classObjectId;
+  const effectiveStudentSubId = studentSubId || check.studentSubId;
+  const effectiveStudentIndex =
+    typeof studentIndex === "number" && studentIndex >= 0
+      ? studentIndex
+      : check.studentIndex;
+  const storedNom = check.studentStoredNom;
+  const storedPrenom = check.studentStoredPrenom;
+
+  if (
+    !effectiveStudentSubId &&
+    !(typeof effectiveStudentIndex === "number" && effectiveStudentIndex >= 0) &&
+    (!storedNom || !storedPrenom)
+  ) {
+    return { ok: false, message: "Erreur interne du serveur." };
+  }
+
+  let studentIdentity;
+  let update;
+
+  if (effectiveStudentSubId) {
+    studentIdentity = { _id: effectiveStudentSubId };
+    update = await Classe.updateOne(
+      {
+        _id: classObjectId,
+        codeExpires: { $gt: new Date() },
+        active: true,
+        students: {
+          $elemMatch: {
+            ...studentIdentity,
+            $or: [
+              { id_user: userObjectId },
+              { free: { $ne: false }, id_user: null },
+            ],
+          },
+        },
+      },
+      {
+        $set: {
+          "students.$.free": false,
+          "students.$.id_user": userObjectId,
+        },
+      }
+    );
+  } else if (typeof effectiveStudentIndex === "number" && effectiveStudentIndex >= 0) {
+    studentIdentity = { index: effectiveStudentIndex };
+    const freePath = `students.${effectiveStudentIndex}.free`;
+    const idUserPath = `students.${effectiveStudentIndex}.id_user`;
+
+    update = await Classe.updateOne(
+      {
+        _id: classObjectId,
+        codeExpires: { $gt: new Date() },
+        active: true,
+        $or: [
+          { [idUserPath]: userObjectId },
+          { [idUserPath]: null, [freePath]: { $ne: false } },
+        ],
+      },
+      { $set: { [freePath]: false, [idUserPath]: userObjectId } }
+    );
+  } else {
+    studentIdentity = { nom: storedNom, prenom: storedPrenom };
+    update = await Classe.updateOne(
+      {
+        _id: classObjectId,
+        codeExpires: { $gt: new Date() },
+        active: true,
+        students: {
+          $elemMatch: {
+            ...studentIdentity,
+            $or: [
+              { id_user: userObjectId },
+              { free: { $ne: false }, id_user: null },
+            ],
+          },
+        },
+      },
+      {
+        $set: {
+          "students.$.free": false,
+          "students.$.id_user": userObjectId,
+        },
+      }
+    );
+  }
+
+  const matched = update?.matchedCount ?? update?.n ?? 0;
+  const modified = update?.modifiedCount ?? update?.nModified ?? 0;
+
+  if (!matched) {
+    let alreadyOwned = null;
+    if (studentIdentity?.index !== undefined) {
+      alreadyOwned = await Classe.exists({
+        _id: classObjectId,
+        [`students.${studentIdentity.index}.id_user`]: userObjectId,
+      });
+    } else if (studentIdentity?._id) {
+      alreadyOwned = await Classe.exists({
+        _id: classObjectId,
+        students: { $elemMatch: { _id: studentIdentity._id, id_user: userObjectId } },
+      });
+    } else {
+      alreadyOwned = await Classe.exists({
+        _id: classObjectId,
+        students: { $elemMatch: { id_user: userObjectId } },
+      });
+    }
+    if (alreadyOwned) return { ok: true };
+    return { ok: false, message: "Cette place n'est plus disponible." };
+  }
+
+  if (!modified) return { ok: true };
+
+  return { ok: true };
+}
+
+router.post("/signup/validate-teacher-code", async (req, res) => {
+  try {
+    const { code } = req.body || {};
+    await teacherCodeSchema.validate({ code }, { abortEarly: false });
+
+    const classe = await getActiveClassByTeacherCode(code);
+    if (!classe) {
+      return res.status(400).json({
+        message: "Ce code n'est pas ou n'est plus valide",
+        redirect: true,
+      });
+    }
+
+    const students = Array.isArray(classe.students) ? classe.students : [];
+    const availableStudents = students.filter(
+      (st) => st?.free !== false && (st?.id_user === null || st?.id_user === undefined)
+    );
+
+    return res.status(200).json({
+      classId: classe._id.toString(),
+      students: availableStudents,
+    });
+  } catch (error) {
+    if (error.name === "ValidationError") {
+      const validationErrors = error.inner.map((err) => ({
+        field: err.path,
+        message: err.message,
+      }));
+      return res.status(400).json({ errors: validationErrors });
+    }
+    return res.status(400).json({
+      message: "Ce code n'est pas ou n'est plus valide",
+      redirect: true,
+    });
+  }
+});
+
+router.post("/signup/check-student", async (req, res) => {
+  try {
+    let { classId, nom, prenom, email } = req.body || {};
+    email = typeof email === "string" ? email.toLowerCase().trim() : "";
+
+    await signupTeacherCodeSchema.validate(
+      { classId, nom, prenom, email },
+      { abortEarly: false }
+    );
+
+    const studentCheck = await ensureStudentInClass({ classId, nom, prenom });
+    if (!studentCheck.ok) {
+      return res
+        .status(400)
+        .json({ message: studentCheck.message, redirect: true });
+    }
+
+    const existingUser = await User.findOne({ email }).select("_id");
+    return res.status(200).json({ emailExists: !!existingUser });
+  } catch (error) {
+    if (error.name === "ValidationError") {
+      const validationErrors = error.inner.map((err) => ({
+        field: err.path,
+        message: err.message,
+      }));
+      return res.status(400).json({ errors: validationErrors });
+    }
+    console.error("Erreur /signup/check-student :", error);
+    return res.status(500).json({ message: "Erreur interne du serveur." });
+  }
+});
+
+router.post("/signup/create", async (req, res) => {
+  let { classId, nom, prenom, email, password, confirmPassword } = req.body || {};
+  const rawNom = nom;
+  const rawPrenom = prenom;
+  nom = normalizeNom(nom);
+  prenom = normalizePrenom(prenom);
+  email = typeof email === "string" ? email.toLowerCase().trim() : "";
+
+  try {
+    await signupCreateSchema.validate(
+      { classId, nom: rawNom, prenom: rawPrenom, email, password, confirmPassword },
+      { abortEarly: false }
+    );
+
+    const studentCheck = await ensureStudentInClass({
+      classId,
+      nom: rawNom,
+      prenom: rawPrenom,
+    });
+    if (!studentCheck.ok) {
+      return res
+        .status(400)
+        .json({ message: studentCheck.message, redirect: true });
+    }
+
+    const existingEmail = await User.findOne({ email });
+    if (existingEmail) {
+      return res.status(400).json({ error: "Cet email est dÃ©jÃ  utilisÃ©" });
+    }
+
+    const existingUser = await User.findOne({ nom, prenom });
+    if (existingUser) {
+      return res
+        .status(400)
+        .json({ error: `L'utilisateur ${nom} ${prenom} est dÃ©jÃ  inscrit` });
+    }
+
+    const codeAlea = generateCode();
+    const hashedCode = await bcrypt.hash(codeAlea, 10);
+
+    const mailOptions = {
+      from: process.env.GMAIL_USER,
+      to: email,
+      subject: "Inscription MathsApp - VÃ©rification de lâ€™email",
+      text: `Bonjour ${prenom},\n\nVotre code de vÃ©rification est : ${codeAlea}\nFaire la diffÃ©rence entre majuscule et micuscule\nCe code expire dans 10 minutes.`,
+      html: `<div style="font-family: Arial, sans-serif; font-size:16px; line-height:1.6;">
+    <p>Bonjour ${prenom},</p>
+    <p>Votre code de vÃ©rification est :</p>
+    <div style="font-size:28px; font-weight:bold; letter-spacing:3px;">${codeAlea}</div>
+    <p>Faire la diffÃ©rence entre majuscule et minuscule.</p>
+    <p>Ce code expire dans 10 minutes.</p>
+  </div>`,
+    };
+
+    const info = await transporter.sendMail(mailOptions);
+
+    const hashedPassword = await bcrypt.hash(password, 10);
+
+    const newUser = new User({
+      nom,
+      prenom,
+      email,
+      password: hashedPassword,
+      confirm: hashedCode,
+      confirmExpires: new Date(Date.now() + 10 * 60 * 1000),
+    });
+
+    await newUser.save();
+
+    const claim = await claimStudentSlot({
+      classId,
+      nom: rawNom,
+      prenom: rawPrenom,
+      userObjectId: newUser._id,
+    });
+    if (!claim.ok) {
+      await User.deleteOne({ _id: newUser._id }).catch(() => {});
+      return res
+        .status(409)
+        .json({ message: "Cette place n'est plus disponible.", redirect: true });
+    }
+
+    return res
+      .status(201)
+      .json({ sendMail: true, email, infoMail: info.messageId });
+  } catch (error) {
+    if (error.name === "ValidationError") {
+      const validationErrors = error.inner.map((err) => ({
+        field: err.path,
+        message: err.message,
+      }));
+      return res.status(400).json({ errors: validationErrors });
+    }
+    console.error("Erreur /signup/create :", error);
+    return res.status(500).json({ error: "Erreur interne du serveur" });
+  }
+});
+
+router.post("/signup/join-existing", async (req, res) => {
+  let { classId, nom, prenom, email, password } = req.body || {};
+  const rawNom = nom;
+  const rawPrenom = prenom;
+  const normalizedNom = normalizeNom(nom);
+  const normalizedPrenom = normalizePrenom(prenom);
+  email = typeof email === "string" ? email.toLowerCase().trim() : "";
+
+  try {
+    await signupJoinExistingSchema.validate(
+      { classId, nom: rawNom, prenom: rawPrenom, email, password },
+      { abortEarly: false }
+    );
+
+    const user = await User.findOne({ email, active: true }).select("+password");
+    if (!user || !bcrypt.compareSync(password, user.password) || !user.isVerified) {
+      return res.status(401).json({ message: "Identifiants invalides." });
+    }
+
+    const nomBdd = user.nom || "";
+    const prenomBdd = user.prenom || "";
+
+    if (normalizedNom !== nomBdd || normalizedPrenom !== prenomBdd) {
+      return res.status(400).json({
+        message: `Les nom et prénom correspondant à l'email ${email} ne correspondent pas à ceux déjà saisis qui sont ${nomBdd} ${prenomBdd}. En informer votre professeur`,
+        redirect: true,
+      });
+    }
+
+    const studentCheck = await ensureStudentInClass({
+      classId,
+      nom: rawNom,
+      prenom: rawPrenom,
+      userObjectId: user._id,
+    });
+    if (!studentCheck.ok) {
+      return res
+        .status(400)
+        .json({ message: studentCheck.message, redirect: true });
+    }
+
+    const claim = await claimStudentSlot({
+      classId,
+      nom: rawNom,
+      prenom: rawPrenom,
+      userObjectId: user._id,
+    });
+    if (!claim.ok) {
+      return res
+        .status(409)
+        .json({ message: "Cette place n'est plus disponible.", redirect: true });
+    }
+
+    const classObjectId = new mongoose.Types.ObjectId(classId);
+    await User.updateOne(
+      {
+        _id: user._id,
+        follow: { $not: { $elemMatch: { classe: classObjectId } } },
+      },
+      { $push: { follow: { classe: classObjectId, role: "user" } } }
+    );
+
+    return res.status(200).json({ success: true });
+  } catch (error) {
+    if (error.name === "ValidationError") {
+      const validationErrors = error.inner.map((err) => ({
+        field: err.path,
+        message: err.message,
+      }));
+      return res.status(400).json({ errors: validationErrors });
+    }
+    console.error("Erreur /signup/join-existing :", error);
+    return res.status(500).json({ message: "Erreur interne du serveur." });
+  }
+});
 
 router.post("/signup", async (req, res) => {
   let { nom, prenom, email, password, confirmPassword } = req.body;
@@ -173,8 +703,9 @@ router.post("/signup", async (req, res) => {
 });
 
 router.post("/verifmail", async (req, res) => {
-  let { email, code } = req.body;
+  let { email, code, classId } = req.body;
   email = typeof email === "string" ? email.toLowerCase().trim() : "";
+  classId = typeof classId === "string" ? classId.trim() : "";
 
   try {
     // 1️⃣ Validation des données avec Yup
@@ -211,13 +742,48 @@ router.post("/verifmail", async (req, res) => {
       return res.status(400).json({ error: "Code incorrect." });
     }
 
-    // ✅ Active le compte
-    await User.updateOne(
-      { email },
-      {
-        $set: { isVerified: true, confirm: "", confirmExpires: null },
+    if (classId && mongoose.Types.ObjectId.isValid(classId)) {
+      const studentCheck = await ensureStudentInClass({
+        classId,
+        nom: user.nom,
+        prenom: user.prenom,
+        userObjectId: user._id,
+      });
+
+      if (!studentCheck.ok) {
+        return res.status(400).json({ error: studentCheck.message });
       }
-    );
+
+      const claim = await claimStudentSlot({
+        classId,
+        nom: user.nom,
+        prenom: user.prenom,
+        userObjectId: user._id,
+      });
+
+      if (!claim.ok) {
+        return res.status(409).json({
+          error: "Cette place n'est plus disponible. En informer votre professeur.",
+        });
+      }
+
+      const classObjectId = new mongoose.Types.ObjectId(classId);
+      await User.updateOne(
+        { _id: user._id },
+        {
+          $set: { isVerified: true, confirm: "", confirmExpires: null },
+          $addToSet: { follow: { classe: classObjectId, role: "user" } },
+        }
+      );
+    } else {
+      await User.updateOne(
+        { email },
+        {
+          $set: { isVerified: true, confirm: "", confirmExpires: null },
+        }
+      );
+    }
+
     return res
       .status(200)
       .json({ success: true, message: "Email vérifié avec succès." });
