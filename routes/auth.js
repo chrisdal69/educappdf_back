@@ -14,40 +14,6 @@ const nodemailer = require("nodemailer");
 
 const nameRegex = /^[\p{L}\s_-]+$/u;
 
-const signupSchema = yup.object().shape({
-  nom: yup
-    .string()
-    .trim()
-    .min(2, "Le nom doit contenir au moins 2 caractères")
-    .matches(nameRegex, "Lettres, espaces, - ou _ uniquement")
-    .required("Le nom est obligatoire"),
-  prenom: yup
-    .string()
-    .trim()
-    .min(2, "Le prénom doit contenir au moins 2 caractères")
-    .matches(nameRegex, "Lettres, espaces, - ou _ uniquement")
-    .required("Le prénom est obligatoire"),
-  email: yup
-    .string()
-    .trim()
-    .email("Adresse email invalide")
-    .required("L'email est obligatoire"),
-  password: yup
-    .string()
-    .min(8, "8 caractères minimum")
-    .matches(/[A-Z]/, "Une majuscule est requise")
-    .matches(/[a-z]/, "Une minuscule est requise")
-    .matches(/[0-9]/, "Un chiffre est requis")
-    .matches(/[^A-Za-z0-9]/, "Un caractère spécial est requis")
-    .required("Mot de passe obligatoire"),
-  confirmPassword: yup
-    .string()
-    .oneOf([yup.ref("password"), null], "Les mots de passe ne correspondent pas")
-    .required("Confirmez votre mot de passe"),
-});
-
-
-
 const verifmailcodeSchema = yup.object().shape({
   email: yup
     .string()
@@ -72,26 +38,6 @@ function generateCode(length = 4) {
     result += chars.charAt(Math.floor(Math.random() * chars.length));
   }
   return result;
-}
-
-function removeSpaces(str) {
-  if (typeof str !== "string") return "";
-
-  // remplace accents ciblés puis enlève les espaces
-  const accentMap = {
-    é: "e", ë: "e", è: "e", ê: "e", É: "E", Ë: "E", È: "E", Ê: "E",
-    ô: "o", ö: "o", Ô: "O", Ö: "O",
-    ü: "u", ù: "u", û: "u", Ü: "U", Ù: "U", Û: "U",
-    ï: "i", î: "i", Ï: "I", Î: "I",
-    â: "a", à: "a", ä: "a", Â: "A", À: "A", Ä: "A",
-    ç: "c", Ç: "C",
-  };
-
-  const withoutSpaces = str.replace(/\s+/g, "");
-  return withoutSpaces.replace(
-    /[éëèêÉËÈÊôöÔÖüùûÜÙÛïîÏÎâàäÂÀÄçÇ]/g,
-    (c) => accentMap[c] || ""
-  );
 }
 
 function normalizeNoAccentNoSpaces(value) {
@@ -275,8 +221,7 @@ async function claimStudentSlot({
 
   if (
     !effectiveStudentSubId &&
-    !(typeof effectiveStudentIndex === "number" && effectiveStudentIndex >= 0) &&
-    (!storedNom || !storedPrenom)
+    !(typeof effectiveStudentIndex === "number" && effectiveStudentIndex >= 0)
   ) {
     return { ok: false, message: "Erreur interne du serveur." };
   }
@@ -312,42 +257,22 @@ async function claimStudentSlot({
     studentIdentity = { index: effectiveStudentIndex };
     const freePath = `students.${effectiveStudentIndex}.free`;
     const idUserPath = `students.${effectiveStudentIndex}.id_user`;
+    const nomPath = `students.${effectiveStudentIndex}.nom`;
+    const prenomPath = `students.${effectiveStudentIndex}.prenom`;
 
     update = await Classe.updateOne(
       {
         _id: classObjectId,
         codeExpires: { $gt: new Date() },
         active: true,
+        ...(storedNom ? { [nomPath]: storedNom } : {}),
+        ...(storedPrenom ? { [prenomPath]: storedPrenom } : {}),
         $or: [
           { [idUserPath]: userObjectId },
           { [idUserPath]: null, [freePath]: { $ne: false } },
         ],
       },
       { $set: { [freePath]: false, [idUserPath]: userObjectId } }
-    );
-  } else {
-    studentIdentity = { nom: storedNom, prenom: storedPrenom };
-    update = await Classe.updateOne(
-      {
-        _id: classObjectId,
-        codeExpires: { $gt: new Date() },
-        active: true,
-        students: {
-          $elemMatch: {
-            ...studentIdentity,
-            $or: [
-              { id_user: userObjectId },
-              { free: { $ne: false }, id_user: null },
-            ],
-          },
-        },
-      },
-      {
-        $set: {
-          "students.$.free": false,
-          "students.$.id_user": userObjectId,
-        },
-      }
     );
   }
 
@@ -577,18 +502,6 @@ router.post("/signup/join-existing", async (req, res) => {
       });
     }
 
-    const studentCheck = await ensureStudentInClass({
-      classId,
-      nom: rawNom,
-      prenom: rawPrenom,
-      userObjectId: user._id,
-    });
-    if (!studentCheck.ok) {
-      return res
-        .status(400)
-        .json({ message: studentCheck.message, redirect: true });
-    }
-
     const claim = await claimStudentSlot({
       classId,
       nom: rawNom,
@@ -596,9 +509,8 @@ router.post("/signup/join-existing", async (req, res) => {
       userObjectId: user._id,
     });
     if (!claim.ok) {
-      return res
-        .status(409)
-        .json({ message: "Cette place n'est plus disponible.", redirect: true });
+      const status = claim.message?.includes("place") ? 409 : 400;
+      return res.status(status).json({ message: claim.message, redirect: true });
     }
 
     const classObjectId = new mongoose.Types.ObjectId(classId);
@@ -621,84 +533,6 @@ router.post("/signup/join-existing", async (req, res) => {
     }
     console.error("Erreur /signup/join-existing :", error);
     return res.status(500).json({ message: "Erreur interne du serveur." });
-  }
-});
-
-router.post("/signup", async (req, res) => {
-  let { nom, prenom, email, password, confirmPassword } = req.body;
-  nom = removeSpaces(nom);
-  nom = nom.toUpperCase().trim();
-  prenom = removeSpaces(prenom)
-  prenom = prenom.toLowerCase().trim();
-  email = typeof email === "string" ? email.toLowerCase().trim() : "";
-  try {
-    // 1️⃣ Validation des données avec Yup
-    await signupSchema.validate(
-      { nom, prenom, email, password, confirmPassword },
-      { abortEarly: false } // pour obtenir toutes les erreurs à la fois
-    );
-
-    // 2️⃣ Vérification si l'utilisateur existe déjà par l'email et par le nom, prenom
-    const existingEmail = await User.findOne({ email });
-    if (existingEmail) {
-      return res.status(400).json({ error: "Cet email est déjà utilisé" });
-    }
-    const existingUser = await User.findOne({ nom, prenom });
-    if (existingUser) {
-      return res
-        .status(400)
-        .json({ error: `L'utilisateur ${nom} ${prenom} est déjà inscrit` });
-    }
-
-    // 3️⃣ Validation de l'adresse email récupérée
-    const codeAlea = generateCode();
-    const hashedCode = await bcrypt.hash(codeAlea, 10); // hash du code avant stockage
-    const mailOptions = {
-      from: process.env.GMAIL_USER,
-      to: email,
-      subject: "Inscription MathsApp - Vérification de l’email",
-      text: `Bonjour ${prenom},\n\nVotre code de vérification est : ${codeAlea}\nFaire la différence entre majuscule et micuscule\nCe code expire dans 10 minutes.`,
-      html: `<div style="font-family: Arial, sans-serif; font-size:16px; line-height:1.6;">
-    <p>Bonjour ${prenom},</p>
-    <p>Votre code de vérification est :</p>
-    <div style="font-size:28px; font-weight:bold; letter-spacing:3px;">${codeAlea}</div>
-    <p>Faire la différence entre majuscule et minuscule.</p>
-    <p>Ce code expire dans 10 minutes.</p>
-  </div>`,
-    };
-
-    const info = await transporter.sendMail(mailOptions);
-
-    // 3️⃣ Hash du mot de passe
-    const hashedPassword = await bcrypt.hash(password, 10);
-
-    // 4️⃣ Création de l’utilisateur dans la BDD Mongoose
-    const newUser = new User({
-      nom,
-      prenom,
-      email,
-      password: hashedPassword,
-      confirm: hashedCode,
-      confirmExpires: new Date(Date.now() + 10 * 60 * 1000), // 10 min
-    });
-    const newDoc = await newUser.save();
-    console.log("signup : ", newDoc);
-
-    // 5️⃣ Réponse OK
-    return res
-      .status(201)
-      .json({ sendMail: true, email, infoMail: info.messageId });
-  } catch (error) {
-    // Gestion des erreurs de validation Yup
-    if (error.name === "ValidationError") {
-      const validationErrors = error.inner.map((err) => ({
-        field: err.path,
-        message: err.message,
-      }));
-      return res.status(400).json({ errors: validationErrors });
-    }
-    console.error("Erreur lors de l'inscription :", error);
-    return res.status(500).json({ error: "Erreur interne du serveur" });
   }
 });
 
@@ -743,17 +577,6 @@ router.post("/verifmail", async (req, res) => {
     }
 
     if (classId && mongoose.Types.ObjectId.isValid(classId)) {
-      const studentCheck = await ensureStudentInClass({
-        classId,
-        nom: user.nom,
-        prenom: user.prenom,
-        userObjectId: user._id,
-      });
-
-      if (!studentCheck.ok) {
-        return res.status(400).json({ error: studentCheck.message });
-      }
-
       const claim = await claimStudentSlot({
         classId,
         nom: user.nom,
@@ -762,9 +585,8 @@ router.post("/verifmail", async (req, res) => {
       });
 
       if (!claim.ok) {
-        return res.status(409).json({
-          error: "Cette place n'est plus disponible. En informer votre professeur.",
-        });
+        const status = claim.message?.includes("place") ? 409 : 400;
+        return res.status(status).json({ error: claim.message });
       }
 
       const classObjectId = new mongoose.Types.ObjectId(classId);
