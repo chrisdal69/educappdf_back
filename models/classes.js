@@ -25,10 +25,7 @@ const studentSchema = new mongoose.Schema({
 });
 
 const classeSchema = new mongoose.Schema({
-  teacher: {
-    type: [{ type: mongoose.Schema.Types.ObjectId, ref: "User" }],
-    default: [],
-  },
+
   directory: {
     type: String,
     unique: true,

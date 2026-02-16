@@ -109,9 +109,8 @@ router.post("/leave-class", authenticate, async (req, res) => {
     if (lower !== classId) {
       pullCandidates.push(lower);
     }
-    if (mongoose.Types.ObjectId.isValid(classId)) {
-      pullCandidates.push(new mongoose.Types.ObjectId(classId));
-    }
+    const classObjectId = new mongoose.Types.ObjectId(classId);
+    pullCandidates.push(classObjectId);
 
     const userObjectId = mongoose.Types.ObjectId.isValid(userId)
       ? new mongoose.Types.ObjectId(userId)
@@ -122,13 +121,23 @@ router.post("/leave-class", authenticate, async (req, res) => {
     }
 
     // Utiliser le driver natif pour éviter le casting Mongoose sur `follow`.
-    const updateResult = await User.collection.updateOne(
-      { _id: userObjectId },
-      { $pull: { follow: { $in: pullCandidates } } }
-    );
+    const [updateNewShape, updateOldShape] = await Promise.all([
+      User.collection.updateOne(
+        { _id: userObjectId },
+        { $pull: { follow: { classe: classObjectId } } }
+      ),
+      User.collection.updateOne(
+        { _id: userObjectId },
+        { $pull: { follow: { $in: pullCandidates } } }
+      ),
+    ]);
 
-    const matched = updateResult?.matchedCount ?? updateResult?.n ?? 0;
-    const modified = updateResult?.modifiedCount ?? updateResult?.nModified ?? 0;
+    const matched = updateNewShape?.matchedCount ?? updateNewShape?.n ?? 0;
+    const modifiedNew =
+      updateNewShape?.modifiedCount ?? updateNewShape?.nModified ?? 0;
+    const modifiedOld =
+      updateOldShape?.modifiedCount ?? updateOldShape?.nModified ?? 0;
+    const modified = modifiedNew + modifiedOld;
 
     if (!matched) {
       return res.status(404).json({ message: "Utilisateur introuvable." });

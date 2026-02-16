@@ -356,26 +356,59 @@ router.post("/login", async (req, res) => {
         .json({ message: "Compte inexistant ou non vérifié" });
     }
 
-    // 3. Interroge la collection Classe
-    const teachersClasses = await Classe.find({
-      teacher: data._id,
+    // 3. Les classes disponibles sont dans `User.follow` (classe + role)
+    const followEntries = Array.isArray(data.follow) ? data.follow : [];
+    const adminClassIds = new Set();
+    const userClassIds = new Set();
+
+    for (const entry of followEntries) {
+      const classeValue =
+        entry && typeof entry === "object" ? entry.classe : entry;
+      const classId = classeValue ? String(classeValue).trim() : "";
+      if (!/^[0-9a-fA-F]{24}$/.test(classId)) {
+        continue;
+      }
+
+      const followRole =
+        entry &&
+        typeof entry === "object" &&
+        typeof entry.role === "string" &&
+        entry.role === "admin"
+          ? "admin"
+          : "user";
+
+      if (followRole === "admin") {
+        adminClassIds.add(classId);
+        userClassIds.delete(classId);
+      } else if (!adminClassIds.has(classId)) {
+        userClassIds.add(classId);
+      }
+    }
+
+    const allClassIds = [...new Set([...adminClassIds, ...userClassIds])];
+
+    const classes = await Classe.find({
+      _id: { $in: allClassIds },
       active: true,
     }).select("_id name");
 
-    const followedClasses = await Classe.find({
-      _id: { $in: data.follow || [] },
-      active: true,
-    }).select("_id name");
+    const classNameById = new Map(
+      classes.map((cl) => [cl._id.toString(), cl.name])
+    );
 
-    const teacherClassesSummary = teachersClasses.map((cl) => ({
-      id: cl._id,
-      name: cl.name,
-    }));
+    const teacherClassesSummary = [...adminClassIds]
+      .filter((id) => classNameById.has(id))
+      .map((id) => ({
+        id,
+        name: classNameById.get(id) || "Classe sans nom",
+      }));
 
-    const followedClassesSummary = followedClasses.map((cl) => ({
-      id: cl._id,
-      name: cl.name,
-    }));
+    const followedClassesSummary = [...userClassIds]
+      .filter((id) => classNameById.has(id))
+      .map((id) => ({
+        id,
+        name: classNameById.get(id) || "Classe sans nom",
+      }));
 
     const totalClasses =
       teacherClassesSummary.length + followedClassesSummary.length;
@@ -452,28 +485,32 @@ router.post("/login/select-class", async (req, res) => {
     const selectedClass = await Classe.findOne({
       _id: classId,
       active: true,
-    }).select("_id name directory tabs teacher");
+    }).select("_id name directory tabs");
 
     if (!selectedClass) {
       return res.status(404).json({ message: "Classe introuvable" });
     }
 
-    const isTeacher = Array.isArray(selectedClass.teacher)
-      ? selectedClass.teacher.some(
-          (id) => id && id.toString() === user._id.toString()
-        )
-      : selectedClass.teacher &&
-        selectedClass.teacher.toString() === user._id.toString();
+    // Le role est deja defini dans `User.follow`.
 
-    const isFollower =
-      Array.isArray(user.follow) &&
-      user.follow.some((id) => id.toString() === selectedClass._id.toString());
+    const followEntry = Array.isArray(user.follow)
+      ? user.follow.find((entry) => {
+          const followedId =
+            entry && typeof entry === "object" ? entry.classe ?? entry : entry;
+          return (
+            followedId &&
+            followedId.toString() === selectedClass._id.toString()
+          );
+        })
+      : null;
 
-    if (!isTeacher && !isFollower) {
+    const isFollower = !!followEntry;
+
+    if (!isFollower) {
       return res.status(403).json({ message: "Classe non autorisée" });
     }
 
-    const role = isTeacher ? "admin" : "user";
+    const role = followEntry?.role ?? "user";
 
     const accessToken = jwt.sign(
       {
