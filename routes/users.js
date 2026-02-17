@@ -267,6 +267,22 @@ const adminStudentSchema = yup.object().shape({
   studentId: objectIdSchema,
 });
 
+const adminCreateStudentSchema = yup.object().shape({
+  classId: objectIdSchema,
+  nom: yup
+    .string()
+    .trim()
+    .min(1, "Nom obligatoire")
+    .max(80, "Nom trop long")
+    .required("Nom obligatoire"),
+  prenom: yup
+    .string()
+    .trim()
+    .min(1, "Prénom obligatoire")
+    .max(80, "Prénom trop long")
+    .required("Prénom obligatoire"),
+});
+
 const isAdminForClass = (req, classId) =>
   req?.user?.classId && String(req.user.classId) === String(classId);
 
@@ -328,6 +344,47 @@ router.get("/admin/class/:classId/students", requireAdmin, async (req, res) => {
   } catch (error) {
     if (handleYupError(error, res)) return;
     console.error("Erreur admin class students:", error);
+    return res.status(500).json({ message: "Erreur serveur." });
+  }
+});
+
+router.post("/admin/class/:classId/students", requireAdmin, async (req, res) => {
+  const { classId } = req.params || {};
+  const { nom, prenom } = req.body || {};
+  try {
+    await adminCreateStudentSchema.validate(
+      { classId, nom, prenom },
+      { abortEarly: false }
+    );
+
+    if (!isAdminForClass(req, classId)) {
+      return res.status(403).json({ message: "Classe non autorisée" });
+    }
+
+    const classe = await Classe.findById(classId).select("students");
+    if (!classe) {
+      return res.status(404).json({ message: "Classe introuvable" });
+    }
+
+    classe.students.push({
+      nom,
+      prenom,
+      free: true,
+      id_user: null,
+    });
+
+    await classe.save();
+
+    const created = Array.isArray(classe.students)
+      ? classe.students[classe.students.length - 1]
+      : null;
+
+    return res.status(201).json({
+      studentId: created?._id ? String(created._id) : null,
+    });
+  } catch (error) {
+    if (handleYupError(error, res)) return;
+    console.error("Erreur create student:", error);
     return res.status(500).json({ message: "Erreur serveur." });
   }
 });
