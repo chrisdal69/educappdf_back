@@ -22,6 +22,13 @@ const studentSchema = new mongoose.Schema({
     required: true,
     set: normalizeLowerNoAccent,
   },
+  email: {
+    type: String,
+    required: false,
+    trim: true,
+    lowercase: true,
+    default: "",
+  },
   free: { type: Boolean, select: true },
   id_user: {
     type: mongoose.Schema.Types.ObjectId,

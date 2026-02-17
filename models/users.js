@@ -2,7 +2,7 @@ const mongoose = require("mongoose");
 
 const followSchema = new mongoose.Schema({
     classe: { type: mongoose.Schema.Types.ObjectId, ref: "Classe" },
-    role: { type: String, enum: ["user", "admin"], default: "user" }
+    role: { type: String, enum: ["user", "admin"], default: "user" },
 });
 
 
