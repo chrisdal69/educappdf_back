@@ -9,6 +9,7 @@ const followSchema = new mongoose.Schema({
 const userSchema = new mongoose.Schema({
   nom: { type: String, required: true, trim: true },
   prenom: { type: String, required: true, trim: true },
+  prefix: { type: String, default: "" },
   email: { type: String, unique: true, required: true, trim: true, lowercase: true },
   password: { type: String, required: true, select: false },
   date: { type: Date, default: Date.now },

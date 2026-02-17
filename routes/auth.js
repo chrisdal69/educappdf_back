@@ -60,6 +60,74 @@ function normalizePrenom(rawPrenom) {
   return normalizeNoAccentNoSpaces(rawPrenom).toLowerCase();
 }
 
+function normalizeForNameMatch(value) {
+  if (typeof value !== "string") return "";
+  return value
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[\s_-]+/g, "")
+    .trim()
+    .toLowerCase();
+}
+
+function removeSpaces(str) {
+  if (typeof str !== "string") return "";
+
+  // remplace accents ciblés puis enlève les espaces
+  const accentMap = {
+    é: "e",
+    ë: "e",
+    è: "e",
+    ê: "e",
+    É: "E",
+    Ë: "E",
+    È: "E",
+    Ê: "E",
+    ô: "o",
+    ö: "o",
+    Ô: "O",
+    Ö: "O",
+    ü: "u",
+    ù: "u",
+    û: "u",
+    Ü: "U",
+    Ù: "U",
+    Û: "U",
+    ï: "i",
+    î: "i",
+    Ï: "I",
+    Î: "I",
+    â: "a",
+    à: "a",
+    ä: "a",
+    Â: "A",
+    À: "A",
+    Ä: "A",
+    ç: "c",
+    Ç: "C",
+  };
+
+  const withoutSeparators = str.replace(/[\s_-]+/g, "");
+  return withoutSeparators.replace(
+    /[éëèêÉËÈÊôöÔÖüùûÜÙÛïîÏÎâàäÂÀÄçÇ]/g,
+    (c) => accentMap[c] || "",
+  );
+}
+
+function formatNomForStorage(rawNom) {
+  return typeof rawNom === "string" ? rawNom.toUpperCase().trim() : "";
+}
+
+function formatPrenomForStorage(rawPrenom) {
+  return typeof rawPrenom === "string" ? rawPrenom.toLowerCase().trim() : "";
+}
+
+function buildUserPrefix({ nom, prenom }) {
+  const upperNom = typeof nom === "string" ? nom.toUpperCase() : "";
+  const lowerPrenom = typeof prenom === "string" ? prenom.toLowerCase() : "";
+  return `${removeSpaces(upperNom)}${removeSpaces(lowerPrenom)}`;
+}
+
 const teacherCodeSchema = yup.object().shape({
   code: yup
     .string()
@@ -110,6 +178,14 @@ const signupCreateSchema = signupTeacherCodeSchema.shape({
 
 const signupJoinExistingSchema = signupTeacherCodeSchema.shape({
   password: yup.string().required("Mot de passe obligatoire"),
+});
+
+const signupCancelSchema = yup.object().shape({
+  email: yup
+    .string()
+    .trim()
+    .email("Adresse email invalide")
+    .required("L'email est obligatoire"),
 });
 
 async function getActiveClassByTeacherCode(rawCode) {
@@ -397,8 +473,9 @@ router.post("/signup/create", async (req, res) => {
   let { classId, nom, prenom, email, password, confirmPassword } = req.body || {};
   const rawNom = nom;
   const rawPrenom = prenom;
-  nom = normalizeNom(nom);
-  prenom = normalizePrenom(prenom);
+  const storedNom = formatNomForStorage(rawNom);
+  const storedPrenom = formatPrenomForStorage(rawPrenom);
+  const prefix = buildUserPrefix({ nom: rawNom, prenom: rawPrenom });
   email = typeof email === "string" ? email.toLowerCase().trim() : "";
 
   try {
@@ -437,11 +514,11 @@ router.post("/signup/create", async (req, res) => {
       }
     }
 
-    const existingUser = await User.findOne({ nom, prenom });
+    const existingUser = await User.findOne({ prefix });
     if (existingUser) {
       return res
         .status(400)
-        .json({ error: `L'utilisateur ${nom} ${prenom} est déjà inscrit` });
+        .json({ error: `L'utilisateur ${storedNom} ${storedPrenom} est déjà inscrit` });
     }
 
     const codeAlea = generateCode();
@@ -450,13 +527,13 @@ router.post("/signup/create", async (req, res) => {
     const mailOptions = {
       from: process.env.GMAIL_USER,
       to: email,
-      subject: "Inscription MathsApp - VÃ©rification de lâ€™email",
-      text: `Bonjour ${prenom},\n\nVotre code de vÃ©rification est : ${codeAlea}\nFaire la diffÃ©rence entre majuscule et micuscule\nCe code expire dans ${SIGNUP_CODE_TTL_MINUTES} minutes.`,
+      subject: "Inscription MathsApp - Vérification de l'email",
+      text: `Bonjour ${prenom},\n\nVotre code de vérification est : ${codeAlea}\nFaire la différence entre majuscule et micuscule\nCe code expire dans ${SIGNUP_CODE_TTL_MINUTES} minutes.`,
       html: `<div style="font-family: Arial, sans-serif; font-size:16px; line-height:1.6;">
     <p>Bonjour ${prenom},</p>
-    <p>Votre code de vÃ©rification est :</p>
+    <p>Votre code de vérification est :</p>
     <div style="font-size:28px; font-weight:bold; letter-spacing:3px;">${codeAlea}</div>
-    <p>Faire la diffÃ©rence entre majuscule et minuscule.</p>
+    <p>Faire la différence entre majuscule et minuscule.</p>
     <p>Ce code expire dans ${SIGNUP_CODE_TTL_MINUTES} minutes.</p>
   </div>`,
     };
@@ -467,8 +544,9 @@ router.post("/signup/create", async (req, res) => {
     const signupExpiresAt = new Date(Date.now() + SIGNUP_CODE_TTL_MS);
 
     const newUser = new User({
-      nom,
-      prenom,
+      nom: storedNom,
+      prenom: storedPrenom,
+      prefix,
       email,
       password: hashedPassword,
       confirm: hashedCode,
@@ -494,12 +572,61 @@ router.post("/signup/create", async (req, res) => {
   }
 });
 
+router.post("/signup/cancel", async (req, res) => {
+  let { email } = req.body || {};
+  email = typeof email === "string" ? email.toLowerCase().trim() : "";
+
+  try {
+    await signupCancelSchema.validate({ email }, { abortEarly: false });
+
+    const user = await User.findOne({ email }).select(
+      "_id isVerified +signupExpiresAt",
+    );
+
+    if (!user) {
+      return res.status(400).json({ message: "Aucun compte trouvé pour cet email." });
+    }
+
+    if (user.isVerified) {
+      return res.status(400).json({ message: "Ce compte est déjà vérifié." });
+    }
+
+    if (!user.signupExpiresAt) {
+      return res.status(400).json({
+        message: "Aucune inscription en attente à annuler pour cet email.",
+      });
+    }
+
+    const deleted = await User.deleteOne({
+      _id: user._id,
+      isVerified: false,
+      signupExpiresAt: { $ne: null },
+    });
+
+    if (deleted.deletedCount !== 1) {
+      return res.status(400).json({ message: "Inscription déjà annulée." });
+    }
+
+    return res.status(200).json({ canceled: true, message: "Inscription annulée" });
+  } catch (error) {
+    if (error.name === "ValidationError") {
+      const validationErrors = error.inner.map((err) => ({
+        field: err.path,
+        message: err.message,
+      }));
+      return res.status(400).json({ errors: validationErrors });
+    }
+    console.error("Erreur /signup/cancel :", error);
+    return res.status(500).json({ message: "Erreur interne du serveur." });
+  }
+});
+
 router.post("/signup/join-existing", async (req, res) => {
   let { classId, nom, prenom, email, password } = req.body || {};
   const rawNom = nom;
   const rawPrenom = prenom;
-  const normalizedNom = normalizeNom(nom);
-  const normalizedPrenom = normalizePrenom(prenom);
+  const normalizedNom = normalizeForNameMatch(nom);
+  const normalizedPrenom = normalizeForNameMatch(prenom);
   email = typeof email === "string" ? email.toLowerCase().trim() : "";
 
   try {
@@ -516,11 +643,19 @@ router.post("/signup/join-existing", async (req, res) => {
     const nomBdd = user.nom || "";
     const prenomBdd = user.prenom || "";
 
-    if (normalizedNom !== nomBdd || normalizedPrenom !== prenomBdd) {
+    if (
+      normalizedNom !== normalizeForNameMatch(nomBdd) ||
+      normalizedPrenom !== normalizeForNameMatch(prenomBdd)
+    ) {
       return res.status(400).json({
         message: `Les nom et prénom correspondant à l'email ${email} ne correspondent pas à ceux déjà saisis qui sont ${nomBdd} ${prenomBdd}. En informer votre professeur`,
         redirect: true,
       });
+    }
+
+    if (!user.prefix) {
+      const prefix = buildUserPrefix({ nom: user.nom || "", prenom: user.prenom || "" });
+      await User.updateOne({ _id: user._id, prefix: { $in: [null, ""] } }, { $set: { prefix } });
     }
 
     const claim = await claimStudentSlot({
@@ -991,6 +1126,9 @@ router.post("/logout", async (req, res) => {
 /************************************************************************* */
 
 /* DEBUT FORGOT */
+const FORGOT_CODE_TTL_MS = 7 * 60 * 1000;
+const FORGOT_CODE_TTL_MINUTES = 7;
+
 const verifmailSchema = yup.object().shape({
   email: yup
     .string()
@@ -1043,8 +1181,9 @@ router.post("/forgot", async (req, res) => {
       {
         $set: {
           confirm: hashedCode,
-          confirmExpires: new Date(Date.now() + 10 * 60 * 1000), // expire dans 10 min
+          confirmExpires: new Date(Date.now() + FORGOT_CODE_TTL_MS),
         },
+        $unset: { signupExpiresAt: 1 },
       }
     );
 
@@ -1058,7 +1197,7 @@ router.post("/forgot", async (req, res) => {
     <p>Votre code de vérification est :</p>
     <div style="font-size:28px; font-weight:bold; letter-spacing:3px;">${codeAlea}</div>
     <p>Faire la différence entre majuscule et minuscule.</p>
-    <p>Ce code expire dans 10 minutes.</p>
+    <p>Ce code expire dans ${FORGOT_CODE_TTL_MINUTES} minutes.</p>
   </div>`,
     };
 
@@ -1110,12 +1249,12 @@ router.post("/resend-forgot", async (req, res) => {
     // 4️⃣ Génère un nouveau code
     const newCode = generateCode();
     const hashedCode = await bcrypt.hash(newCode, 10);
-    const newExpire = new Date(Date.now() + 10 * 60 * 1000); // expire dans 10 min
+    const newExpire = new Date(Date.now() + FORGOT_CODE_TTL_MS);
 
     // 5️⃣ Met à jour le code dans la base
     await User.updateOne(
       { email },
-      { $set: { confirm: hashedCode, confirmExpires: newExpire, signupExpiresAt: newExpire } }
+      { $set: { confirm: hashedCode, confirmExpires: newExpire }, $unset: { signupExpiresAt: 1 } }
     );
 
     // 6️⃣ Envoie du nouveau mail
@@ -1129,7 +1268,7 @@ router.post("/resend-forgot", async (req, res) => {
     <p>Votre code de vérification est :</p>
     <div style="font-size:28px; font-weight:bold; letter-spacing:3px;">${newCode}</div>
     <p>Faire la différence entre majuscule et minuscule.</p>
-    <p>Ce code expire dans 10 minutes.</p>
+    <p>Ce code expire dans ${FORGOT_CODE_TTL_MINUTES} minutes.</p>
   </div>`,
     };
     await transporter.sendMail(mailOptions);
@@ -1185,6 +1324,7 @@ router.post("/reset-password", async (req, res) => {
           confirm: "",
           confirmExpires: null,
         },
+        $unset: { signupExpiresAt: 1 },
       }
     );
     return res.status(200).json({
