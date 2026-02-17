@@ -12,6 +12,9 @@ const nodemailer = require("nodemailer");
 /* DEBUT SIGNUP */
 // VERIFICATION DONNEE RECUES
 
+const SIGNUP_CODE_TTL_MS = 7 * 60 * 1000;
+const SIGNUP_CODE_TTL_MINUTES = 7;
+
 const nameRegex = /^[\p{L}\s_-]+$/u;
 
 const verifmailcodeSchema = yup.object().shape({
@@ -74,15 +77,15 @@ const signupTeacherCodeSchema = yup.object().shape({
   nom: yup
     .string()
     .trim()
-    .min(2, "Le nom doit contenir au moins 2 caractÃ¨res")
+    .min(2, "Le nom doit contenir au moins 2 caractères")
     .matches(nameRegex, "Lettres, espaces, - ou _ uniquement")
     .required("Le nom est obligatoire"),
   prenom: yup
     .string()
     .trim()
-    .min(2, "Le prÃ©nom doit contenir au moins 2 caractÃ¨res")
+    .min(2, "Le prénom doit contenir au moins 2 caractères")
     .matches(nameRegex, "Lettres, espaces, - ou _ uniquement")
-    .required("Le prÃ©nom est obligatoire"),
+    .required("Le prénom est obligatoire"),
   email: yup
     .string()
     .trim()
@@ -93,11 +96,11 @@ const signupTeacherCodeSchema = yup.object().shape({
 const signupCreateSchema = signupTeacherCodeSchema.shape({
   password: yup
     .string()
-    .min(8, "8 caractÃ¨res minimum")
+    .min(8, "8 caractères minimum")
     .matches(/[A-Z]/, "Une majuscule est requise")
     .matches(/[a-z]/, "Une minuscule est requise")
     .matches(/[0-9]/, "Un chiffre est requis")
-    .matches(/[^A-Za-z0-9]/, "Un caractÃ¨re spÃ©cial est requis")
+    .matches(/[^A-Za-z0-9]/, "Un caractère spécial est requis")
     .required("Mot de passe obligatoire"),
   confirmPassword: yup
     .string()
@@ -438,7 +441,7 @@ router.post("/signup/create", async (req, res) => {
     if (existingUser) {
       return res
         .status(400)
-        .json({ error: `L'utilisateur ${nom} ${prenom} est dÃ©jÃ  inscrit` });
+        .json({ error: `L'utilisateur ${nom} ${prenom} est déjà inscrit` });
     }
 
     const codeAlea = generateCode();
@@ -448,20 +451,20 @@ router.post("/signup/create", async (req, res) => {
       from: process.env.GMAIL_USER,
       to: email,
       subject: "Inscription MathsApp - VÃ©rification de lâ€™email",
-      text: `Bonjour ${prenom},\n\nVotre code de vÃ©rification est : ${codeAlea}\nFaire la diffÃ©rence entre majuscule et micuscule\nCe code expire dans 10 minutes.`,
+      text: `Bonjour ${prenom},\n\nVotre code de vÃ©rification est : ${codeAlea}\nFaire la diffÃ©rence entre majuscule et micuscule\nCe code expire dans ${SIGNUP_CODE_TTL_MINUTES} minutes.`,
       html: `<div style="font-family: Arial, sans-serif; font-size:16px; line-height:1.6;">
     <p>Bonjour ${prenom},</p>
     <p>Votre code de vÃ©rification est :</p>
     <div style="font-size:28px; font-weight:bold; letter-spacing:3px;">${codeAlea}</div>
     <p>Faire la diffÃ©rence entre majuscule et minuscule.</p>
-    <p>Ce code expire dans 10 minutes.</p>
+    <p>Ce code expire dans ${SIGNUP_CODE_TTL_MINUTES} minutes.</p>
   </div>`,
     };
 
     const info = await transporter.sendMail(mailOptions);
 
     const hashedPassword = await bcrypt.hash(password, 10);
-    const signupExpiresAt = new Date(Date.now() + 10 * 60 * 1000);
+    const signupExpiresAt = new Date(Date.now() + SIGNUP_CODE_TTL_MS);
 
     const newUser = new User({
       nom,
@@ -670,12 +673,18 @@ router.post("/resend-code", async (req, res) => {
     const newCode = generateCode();
     const newHashedCode = await bcrypt.hash(newCode, 10);
 
-    const newExpire = new Date(Date.now() + 10 * 60 * 1000); // expire dans 10 min
+    const newExpire = new Date(Date.now() + SIGNUP_CODE_TTL_MS);
 
     // 5️⃣ Met à jour le code dans la base
     await User.updateOne(
       { email },
-      { $set: { confirm: newHashedCode, confirmExpires: newExpire } }
+      {
+        $set: {
+          confirm: newHashedCode,
+          confirmExpires: newExpire,
+          signupExpiresAt: newExpire,
+        },
+      }
     );
     console.log("code dans /resend-code : ", newCode);
     // 6️⃣ Envoie du nouveau mail
@@ -684,13 +693,13 @@ router.post("/resend-code", async (req, res) => {
       from: process.env.GMAIL_USER,
       to: email,
       subject: "Inscription MathsApp - Vérification de l’email",
-      text: `Bonjour,\n\nVotre code de vérification est : ${newCode}\nFaire la différence entre majuscule et micuscule\nCe code expire dans 10 minutes.`,
+      text: `Bonjour,\n\nVotre code de vérification est : ${newCode}\nFaire la différence entre majuscule et micuscule\nCe code expire dans ${SIGNUP_CODE_TTL_MINUTES} minutes.`,
       html: `<div style="font-family: Arial, sans-serif; font-size:16px; line-height:1.6;">
     <p>Bonjour,</p>
     <p>Votre code de vérification est :</p>
     <div style="font-size:28px; font-weight:bold; letter-spacing:3px;">${newCode}</div>
     <p>Faire la différence entre majuscule et minuscule.</p>
-    <p>Ce code expire dans 10 minutes.</p>
+    <p>Ce code expire dans ${SIGNUP_CODE_TTL_MINUTES} minutes.</p>
   </div>`,
     };
 
