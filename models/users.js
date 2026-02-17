@@ -15,9 +15,14 @@ const userSchema = new mongoose.Schema({
   isVerified: { type: Boolean, default: false },
   confirm: { type: String, default: "", select: false }, // code hashé
   confirmExpires: { type: Date, default: null, select: false },
+  signupExpiresAt: { type: Date, default: null, select: false },
   status: { type: String, enum: ["eleve", "prof"], default: "eleve" },
   follow: { type: [followSchema], default: [] },
   active: { type: Boolean, default: true },
 });
+
+// TTL: supprime automatiquement les comptes non vérifiés expirés.
+// Si `signupExpiresAt` est null/absent, le document n'est pas concerné.
+userSchema.index({ signupExpiresAt: 1 }, { expireAfterSeconds: 0 });
 
 module.exports = mongoose.model("User", userSchema);

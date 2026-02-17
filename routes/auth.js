@@ -360,7 +360,22 @@ router.post("/signup/check-student", async (req, res) => {
         .json({ message: studentCheck.message, redirect: true });
     }
 
-    const existingUser = await User.findOne({ email }).select("_id");
+    const existingUser = await User.findOne({ email }).select(
+      "_id isVerified +signupExpiresAt"
+    );
+
+    if (
+      existingUser &&
+      existingUser.isVerified === false &&
+      existingUser.signupExpiresAt &&
+      existingUser.signupExpiresAt < new Date()
+    ) {
+      await User.deleteOne({ _id: existingUser._id, isVerified: false }).catch(
+        () => {}
+      );
+      return res.status(200).json({ emailExists: false });
+    }
+
     return res.status(200).json({ emailExists: !!existingUser });
   } catch (error) {
     if (error.name === "ValidationError") {
@@ -400,9 +415,23 @@ router.post("/signup/create", async (req, res) => {
         .json({ message: studentCheck.message, redirect: true });
     }
 
-    const existingEmail = await User.findOne({ email });
+    const now = new Date();
+    const existingEmail = await User.findOne({ email }).select(
+      "_id isVerified +signupExpiresAt"
+    );
     if (existingEmail) {
-      return res.status(400).json({ error: "Cet email est dÃ©jÃ  utilisÃ©" });
+      const isExpiredUnverified =
+        existingEmail.isVerified === false &&
+        existingEmail.signupExpiresAt &&
+        existingEmail.signupExpiresAt < now;
+
+      if (isExpiredUnverified) {
+        await User.deleteOne({ _id: existingEmail._id, isVerified: false }).catch(
+          () => {}
+        );
+      } else {
+        return res.status(400).json({ error: "Cet email est déjà utilisé" });
+      }
     }
 
     const existingUser = await User.findOne({ nom, prenom });
@@ -432,6 +461,7 @@ router.post("/signup/create", async (req, res) => {
     const info = await transporter.sendMail(mailOptions);
 
     const hashedPassword = await bcrypt.hash(password, 10);
+    const signupExpiresAt = new Date(Date.now() + 10 * 60 * 1000);
 
     const newUser = new User({
       nom,
@@ -439,7 +469,8 @@ router.post("/signup/create", async (req, res) => {
       email,
       password: hashedPassword,
       confirm: hashedCode,
-      confirmExpires: new Date(Date.now() + 10 * 60 * 1000),
+      confirmExpires: signupExpiresAt,
+      signupExpiresAt,
     });
 
     await newUser.save();
@@ -581,6 +612,7 @@ router.post("/verifmail", async (req, res) => {
         { _id: user._id },
         {
           $set: { isVerified: true, confirm: "", confirmExpires: null },
+          $unset: { signupExpiresAt: 1 },
           $addToSet: { follow: { classe: classObjectId, role: "user" } },
         }
       );
@@ -589,6 +621,7 @@ router.post("/verifmail", async (req, res) => {
         { email },
         {
           $set: { isVerified: true, confirm: "", confirmExpires: null },
+          $unset: { signupExpiresAt: 1 },
         }
       );
     }
@@ -1073,7 +1106,7 @@ router.post("/resend-forgot", async (req, res) => {
     // 5️⃣ Met à jour le code dans la base
     await User.updateOne(
       { email },
-      { $set: { confirm: hashedCode, confirmExpires: newExpire } }
+      { $set: { confirm: hashedCode, confirmExpires: newExpire, signupExpiresAt: newExpire } }
     );
 
     // 6️⃣ Envoie du nouveau mail
