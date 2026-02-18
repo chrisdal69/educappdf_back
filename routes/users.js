@@ -283,6 +283,10 @@ const adminCreateStudentSchema = yup.object().shape({
     .required("Prénom obligatoire"),
 });
 
+const adminUploadStudentsSchema = yup.object().shape({
+  classId: objectIdSchema,
+});
+
 const isAdminForClass = (req, classId) =>
   req?.user?.classId && String(req.user.classId) === String(classId);
 
@@ -388,6 +392,113 @@ router.post("/admin/class/:classId/students", requireAdmin, async (req, res) => 
     return res.status(500).json({ message: "Erreur serveur." });
   }
 });
+
+router.post(
+  "/admin/class/:classId/students/upload",
+  requireAdmin,
+  async (req, res) => {
+    const { classId } = req.params || {};
+    try {
+      await adminUploadStudentsSchema.validate({ classId }, { abortEarly: false });
+
+      if (!isAdminForClass(req, classId)) {
+        return res.status(403).json({ message: "Classe non autorisée" });
+      }
+
+      const file = req?.files?.file;
+      if (!file) {
+        return res.status(400).json({ message: "Fichier manquant." });
+      }
+
+      const originalName = String(file?.name || "");
+      const lower = originalName.toLowerCase();
+      const isCsvOrTxt = lower.endsWith(".csv") || lower.endsWith(".txt");
+
+      if (!isCsvOrTxt) {
+        return res.status(400).json({
+          message:
+            "Format non supporté. Merci d'utiliser un fichier .csv ou .txt (ou exporter Excel en CSV).",
+        });
+      }
+
+      const buffer = file?.data;
+      const decodeTextBuffer = (buf) => {
+        if (!Buffer.isBuffer(buf)) return "";
+        if (buf.length >= 3 && buf[0] === 0xef && buf[1] === 0xbb && buf[2] === 0xbf) {
+          return buf.slice(3).toString("utf8");
+        }
+        if (buf.length >= 2 && buf[0] === 0xff && buf[1] === 0xfe) {
+          return buf.slice(2).toString("utf16le");
+        }
+        if (buf.length >= 2 && buf[0] === 0xfe && buf[1] === 0xff) {
+          const sliced = buf.slice(2);
+          const swapped = Buffer.allocUnsafe(sliced.length - (sliced.length % 2));
+          for (let i = 0; i < swapped.length; i += 2) {
+            swapped[i] = sliced[i + 1];
+            swapped[i + 1] = sliced[i];
+          }
+          return swapped.toString("utf16le");
+        }
+
+        const utf8 = buf.toString("utf8");
+        const replacementCount = (utf8.match(/\uFFFD/g) || []).length;
+        if (replacementCount > 0) {
+          const latin1 = buf.toString("latin1");
+          if (!latin1.includes("\u0000")) return latin1;
+        }
+        return utf8;
+      };
+
+      const raw = decodeTextBuffer(buffer);
+      if (!raw.trim()) {
+        return res.status(400).json({ message: "Fichier vide." });
+      }
+
+      const rows = raw
+        .split(/\r?\n/)
+        .map((line) => line.trim())
+        .filter(Boolean);
+
+      const parsed = rows
+        .map((line) => {
+          const parts = line.split(/[;,]/).map((p) => p.trim());
+          const nom = parts[0] || "";
+          const prenom = parts[1] || "";
+          return { nom, prenom };
+        })
+        .filter(({ nom, prenom }) => nom && prenom)
+        .filter(({ nom, prenom }) => {
+          const n = nom.toLowerCase();
+          const p = prenom.toLowerCase();
+          return !(n === "nom" && (p === "prenom" || p === "prénom"));
+        });
+
+      if (!parsed.length) {
+        return res.status(400).json({
+          message:
+            "Aucun élève détecté. Format attendu : Nom,prenom (une ligne par élève).",
+        });
+      }
+
+      const classe = await Classe.findById(classId).select("students");
+      if (!classe) {
+        return res.status(404).json({ message: "Classe introuvable" });
+      }
+
+      parsed.forEach(({ nom, prenom }) => {
+        classe.students.push({ nom, prenom, free: true, id_user: null });
+      });
+
+      await classe.save();
+
+      return res.status(201).json({ created: parsed.length });
+    } catch (error) {
+      if (handleYupError(error, res)) return;
+      console.error("Erreur upload students:", error);
+      return res.status(500).json({ message: "Erreur serveur." });
+    }
+  }
+);
 
 router.delete(
   "/admin/class/:classId/students/:studentId",
