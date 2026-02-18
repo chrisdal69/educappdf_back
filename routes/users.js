@@ -388,7 +388,7 @@ router.get("/admin/class/:classId/code", requireAdmin, async (req, res) => {
 });
 
 const CODE_CHARS =
-  "abcdefghjklmnopqrstuvwxyzABCDEFGHJKLMNOPQRSTUVWXYZ123456789";
+  "abcdefghjklmnopqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ123456789";
 
 const generateRandomCode = (length = 4) => {
   let out = "";
