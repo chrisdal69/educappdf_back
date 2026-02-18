@@ -287,6 +287,14 @@ const adminUploadStudentsSchema = yup.object().shape({
   classId: objectIdSchema,
 });
 
+const adminCodeDurationSchema = yup.object().shape({
+  classId: objectIdSchema,
+  duration: yup
+    .string()
+    .oneOf(["3d", "1w", "2w"], "Durée invalide")
+    .required("Durée obligatoire"),
+});
+
 const isAdminForClass = (req, classId) =>
   req?.user?.classId && String(req.user.classId) === String(classId);
 
@@ -348,6 +356,101 @@ router.get("/admin/class/:classId/students", requireAdmin, async (req, res) => {
   } catch (error) {
     if (handleYupError(error, res)) return;
     console.error("Erreur admin class students:", error);
+    return res.status(500).json({ message: "Erreur serveur." });
+  }
+});
+
+router.get("/admin/class/:classId/code", requireAdmin, async (req, res) => {
+  const { classId } = req.params || {};
+  try {
+    await adminClassSchema.validate({ classId }, { abortEarly: false });
+
+    if (!isAdminForClass(req, classId)) {
+      return res.status(403).json({ message: "Classe non autorisée" });
+    }
+
+    const classe = await Classe.findById(classId)
+      .select("+code +codeExpires")
+      .lean();
+    if (!classe) {
+      return res.status(404).json({ message: "Classe introuvable" });
+    }
+
+    return res.status(200).json({
+      code: classe?.code || "",
+      codeExpires: classe?.codeExpires ? new Date(classe.codeExpires).toISOString() : null,
+    });
+  } catch (error) {
+    if (handleYupError(error, res)) return;
+    console.error("Erreur admin class code:", error);
+    return res.status(500).json({ message: "Erreur serveur." });
+  }
+});
+
+const CODE_CHARS =
+  "abcdefghjklmnopqrstuvwxyzABCDEFGHJKLMNOPQRSTUVWXYZ123456789";
+
+const generateRandomCode = (length = 4) => {
+  let out = "";
+  for (let i = 0; i < length; i += 1) {
+    out += CODE_CHARS[Math.floor(Math.random() * CODE_CHARS.length)];
+  }
+  return out;
+};
+
+const generateUniqueActiveCode = async (now, maxAttempts = 200) => {
+  for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+    const code = generateRandomCode(4);
+    // Ne doit pas entrer en collision avec un code encore valide.
+    const exists = await Classe.exists({ code, codeExpires: { $gt: now } });
+    if (!exists) return code;
+  }
+  throw new Error("Impossible de générer un code unique.");
+};
+
+router.post("/admin/class/:classId/code/regenerate", requireAdmin, async (req, res) => {
+  const { classId } = req.params || {};
+  const { duration } = req.body || {};
+  try {
+    await adminCodeDurationSchema.validate({ classId, duration }, { abortEarly: false });
+
+    if (!isAdminForClass(req, classId)) {
+      return res.status(403).json({ message: "Classe non autorisée" });
+    }
+
+    const classeExists = await Classe.exists({ _id: classId });
+    if (!classeExists) {
+      return res.status(404).json({ message: "Classe introuvable" });
+    }
+
+    const now = new Date();
+    const days =
+      duration === "3d" ? 3 : duration === "1w" ? 7 : duration === "2w" ? 14 : 0;
+    const nextExpires = new Date(now.getTime() + days * 24 * 60 * 60 * 1000);
+
+    const nextCode = await generateUniqueActiveCode(now);
+
+    const update = await Classe.updateOne(
+      { _id: classId },
+      { $set: { code: nextCode, codeExpires: nextExpires } }
+    );
+    const matched = update?.matchedCount ?? update?.n ?? 0;
+    const modified = update?.modifiedCount ?? update?.nModified ?? 0;
+
+    if (!matched) {
+      return res.status(404).json({ message: "Classe introuvable" });
+    }
+    if (!modified) {
+      return res.status(400).json({ message: "Mise à jour impossible" });
+    }
+
+    return res.status(200).json({
+      code: nextCode,
+      codeExpires: nextExpires.toISOString(),
+    });
+  } catch (error) {
+    if (handleYupError(error, res)) return;
+    console.error("Erreur regenerate code:", error);
     return res.status(500).json({ message: "Erreur serveur." });
   }
 });
