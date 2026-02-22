@@ -10,11 +10,45 @@ const {
   authorize,
   verifyToken,
   requireAdmin,
+  requireScopedAdmin,
 } = require("../middlewares/auth");
 const Card = require("../models/cards");
 const Cloud = require("../models/cloud");
 const Quizz = require("../models/quizzs");
 const User = require("../models/users");
+
+const getSingleQueryValue = (value) =>
+  Array.isArray(value) ? value[0] : value;
+
+const getCardRepertoireById = async (cardId, expectedClassId) => {
+  const trimmed = typeof cardId === "string" ? cardId.trim() : "";
+  if (!trimmed || !mongoose.Types.ObjectId.isValid(trimmed)) {
+    return null;
+  }
+
+  const classId =
+    typeof expectedClassId === "string" ? expectedClassId.trim() : "";
+  if (classId && !mongoose.Types.ObjectId.isValid(classId)) {
+    return null;
+  }
+
+  const card = await Card.findById(trimmed).select("repertoire classe").lean();
+  if (!card) {
+    return null;
+  }
+
+  if (classId) {
+    const cardClassId = card?.classe ? card.classe.toString() : "";
+    if (!cardClassId || cardClassId !== classId) {
+      return null;
+    }
+  }
+  return typeof card?.repertoire === "string" ? card.repertoire.trim() : null;
+};
+
+const requireCardScopedAdmin = requireScopedAdmin((req) =>
+  getCardRepertoireById(req.params?.id, req.user?.classId)
+);
 
 const NODE_ENV = process.env.NODE_ENV;
 let storage;
@@ -78,7 +112,21 @@ const toBlurFileName = (filename) => {
 
 router.get("/", async (req, res) => {
   try {
-    const result = await Card.find({ visible: true })
+    const rawClassId = Array.isArray(req.query?.classId)
+      ? req.query.classId[0]
+      : req.query?.classId;
+    const classId = typeof rawClassId === "string" ? rawClassId.trim() : "";
+
+    if (classId && !mongoose.Types.ObjectId.isValid(classId)) {
+      return res.status(400).json({ error: "classId invalide." });
+    }
+
+    const query = { visible: true };
+    if (classId) {
+      query.classe = classId;
+    }
+
+    const result = await Card.find(query)
       .sort({ order: -1 })
       .lean()
       .exec();
@@ -121,9 +169,34 @@ router.get("/", async (req, res) => {
   }
 });
 
-router.get("/admin", requireAdmin, async (req, res) => {
+router.get(
+  "/admin",
+  requireScopedAdmin((req) => getSingleQueryValue(req.query?.repertoire)),
+  async (req, res) => {
   try {
-    const result = await Card.find().sort({ order: -1 }).lean().exec();
+    const classId =
+      typeof req.user?.classId === "string" ? req.user.classId.trim() : "";
+    if (!classId || !mongoose.Types.ObjectId.isValid(classId)) {
+      return res.status(401).json({ error: "Classe non selectionnee." });
+    }
+
+    const rawRepertoire = getSingleQueryValue(req.query?.repertoire);
+    const repertoire =
+      typeof rawRepertoire === "string" ? rawRepertoire.trim() : "";
+
+    const query = { classe: classId };
+    if (repertoire) {
+      query.repertoire = repertoire;
+    }
+    const cursor = Card.find(query);
+    if (repertoire) {
+      cursor.collation({ locale: "fr", strength: 1 });
+    }
+
+    const result = await cursor
+      .sort({ order: -1 })
+      .lean()
+      .exec();
 
     if (!result.length) {
       return res.status(404).json({ error: "Aucune carte trouvée." });
@@ -136,17 +209,25 @@ router.get("/admin", requireAdmin, async (req, res) => {
   }
 });
 
-router.post("/admin", requireAdmin, async (req, res) => {
+router.post(
+  "/admin",
+  requireScopedAdmin((req) => req.body?.repertoire),
+  async (req, res) => {
   const repertoire = (req.body?.repertoire || "").trim();
+  const classId =
+    typeof req.user?.classId === "string" ? req.user.classId.trim() : "";
 
   if (!repertoire) {
     return res.status(400).json({ error: "Repertoire manquant." });
+  }
+  if (!classId || !mongoose.Types.ObjectId.isValid(classId)) {
+    return res.status(401).json({ error: "Classe non selectionnee." });
   }
 
   try {
     const computeNextValues = async () => {
       const [agg] = await Card.aggregate([
-        { $match: { repertoire } },
+        { $match: { repertoire, classe: new mongoose.Types.ObjectId(classId) } },
         {
           $group: {
             _id: null,
@@ -172,6 +253,7 @@ router.post("/admin", requireAdmin, async (req, res) => {
       const payload = {
         num: values.nextNum,
         repertoire,
+        classe: classId,
         cloud: false,
         bg: "",
         titre: "",
@@ -283,7 +365,12 @@ router.delete("/cloud/:id", authenticate, async (req, res) => {
   }
 });
 
-router.post("/cloud", requireAdmin, async (req, res) => {
+router.post(
+  "/cloud",
+  requireScopedAdmin((req) =>
+    getCardRepertoireById(req.body?.id_card, req.user?.classId)
+  ),
+  async (req, res) => {
   const { id_card, nom, prenom, message, filename } = req.body || {};
   const trimmedCard = typeof id_card === "string" ? id_card.trim() : "";
   const trimmedNom = typeof nom === "string" ? nom.trim().toUpperCase() : "";
@@ -340,7 +427,7 @@ router.post("/cloud", requireAdmin, async (req, res) => {
   }
 });
 
-router.patch("/:id/title", requireAdmin, async (req, res) => {
+router.patch("/:id/title", requireCardScopedAdmin, async (req, res) => {
   const { id } = req.params;
   const { titre } = req.body || {};
 
@@ -366,7 +453,7 @@ router.patch("/:id/title", requireAdmin, async (req, res) => {
   }
 });
 
-router.patch("/:id/visible", requireAdmin, async (req, res) => {
+router.patch("/:id/visible", requireCardScopedAdmin, async (req, res) => {
   const { id } = req.params;
   const rawValue = (req.body || {}).visible;
   let normalizedVisible = null;
@@ -403,7 +490,7 @@ router.patch("/:id/visible", requireAdmin, async (req, res) => {
   }
 });
 
-router.patch("/:id/cloud", requireAdmin, async (req, res) => {
+router.patch("/:id/cloud", requireCardScopedAdmin, async (req, res) => {
   const { id } = req.params;
   const rawValue = (req.body || {}).cloud;
   let normalizedCloud = null;
@@ -440,7 +527,7 @@ router.patch("/:id/cloud", requireAdmin, async (req, res) => {
   }
 });
 
-router.delete("/:id", requireAdmin, async (req, res) => {
+router.delete("/:id", requireCardScopedAdmin, async (req, res) => {
   const { id } = req.params;
 
   try {
@@ -488,7 +575,7 @@ router.delete("/:id", requireAdmin, async (req, res) => {
   }
 });
 
-router.patch("/:id/move", requireAdmin, async (req, res) => {
+router.patch("/:id/move", requireCardScopedAdmin, async (req, res) => {
   const { id } = req.params;
   const direction = (req.body?.direction || "").toLowerCase();
 
@@ -534,7 +621,7 @@ router.patch("/:id/move", requireAdmin, async (req, res) => {
   }
 });
 
-router.patch("/:id/content", requireAdmin, async (req, res) => {
+router.patch("/:id/content", requireCardScopedAdmin, async (req, res) => {
   const { id } = req.params;
   const rawContent = (req.body || {}).content;
   const rawVersion = (req.body || {}).contentVersion;
@@ -595,7 +682,7 @@ const patchStringField = async (req, res, fieldName, label = fieldName) => {
   }
 };
 
-router.patch("/:id/bg", requireAdmin, async (req, res) => {
+router.patch("/:id/bg", requireCardScopedAdmin, async (req, res) => {
   await patchStringField(req, res, "bg", "bg");
 });
 
@@ -833,7 +920,7 @@ const buildBlurBuffer = async (buffer, format) => {
   }
 };
 
-router.get("/:id/flash/export/zip", requireAdmin, async (req, res) => {
+router.get("/:id/flash/export/zip", requireCardScopedAdmin, async (req, res) => {
   try {
     const { id } = req.params;
     const card = await Card.findById(id)
@@ -921,7 +1008,7 @@ router.get("/:id/flash/export/zip", requireAdmin, async (req, res) => {
   }
 });
 
-router.patch("/:id/flash", requireAdmin, async (req, res) => {
+router.patch("/:id/flash", requireCardScopedAdmin, async (req, res) => {
   const { id } = req.params;
   const rawFlash = (req.body || {}).flash;
 
@@ -948,7 +1035,7 @@ router.patch("/:id/flash", requireAdmin, async (req, res) => {
   }
 });
 
-router.post("/:id/flash", requireAdmin, async (req, res) => {
+router.post("/:id/flash", requireCardScopedAdmin, async (req, res) => {
   const { id } = req.params;
   const position = req.body?.position;
 
@@ -992,7 +1079,7 @@ router.post("/:id/flash", requireAdmin, async (req, res) => {
   }
 });
 
-router.delete("/:id/flash", requireAdmin, async (req, res) => {
+router.delete("/:id/flash", requireCardScopedAdmin, async (req, res) => {
   const { id } = req.params;
   const rawIndex = req.body?.index;
   const flashId = typeof req.body?.flashId === "string" ? req.body.flashId.trim() : "";
@@ -1086,7 +1173,7 @@ router.delete("/:id/flash", requireAdmin, async (req, res) => {
   }
 });
 
-router.post("/:id/flash/image", requireAdmin, async (req, res) => {
+router.post("/:id/flash/image", requireCardScopedAdmin, async (req, res) => {
   const { id } = req.params;
   const flashId = typeof req.body?.flashId === "string" ? req.body.flashId.trim() : "";
   const fieldRaw = typeof req.body?.field === "string" ? req.body.field.trim() : "";
@@ -1207,7 +1294,7 @@ router.post("/:id/flash/image", requireAdmin, async (req, res) => {
   }
 });
 
-router.delete("/:id/flash/image", requireAdmin, async (req, res) => {
+router.delete("/:id/flash/image", requireCardScopedAdmin, async (req, res) => {
   try {
     const { id } = req.params;
     const flashId = typeof req.body?.flashId === "string" ? req.body.flashId.trim() : "";
@@ -1292,7 +1379,7 @@ router.delete("/:id/flash/image", requireAdmin, async (req, res) => {
   }
 });
 
-router.post("/:id/bg/upload", requireAdmin, async (req, res) => {
+router.post("/:id/bg/upload", requireCardScopedAdmin, async (req, res) => {
   const { id } = req.params;
 
   try {
@@ -1417,7 +1504,7 @@ router.post("/:id/bg/upload", requireAdmin, async (req, res) => {
   }
 });
 
-router.post("/:id/files/sign", requireAdmin, async (req, res) => {
+router.post("/:id/files/sign", requireCardScopedAdmin, async (req, res) => {
   const { id } = req.params;
   const rawName = typeof req.body?.name === "string" ? req.body.name.trim() : "";
   const rawType = typeof req.body?.type === "string" ? req.body.type.trim() : "";
@@ -1505,7 +1592,7 @@ router.post("/:id/files/sign", requireAdmin, async (req, res) => {
   }
 });
 
-router.post("/:id/files/confirm", requireAdmin, async (req, res) => {
+router.post("/:id/files/confirm", requireCardScopedAdmin, async (req, res) => {
   const { id } = req.params;
   const descriptionRaw =
     (req.body && (req.body.description || req.body.txt)) || "";
@@ -1647,7 +1734,7 @@ router.post("/:id/files/confirm", requireAdmin, async (req, res) => {
   }
 });
 
-router.post("/:id/files/replace/sign", requireAdmin, async (req, res) => {
+router.post("/:id/files/replace/sign", requireCardScopedAdmin, async (req, res) => {
   const { id } = req.params;
   const targetHref = (
     req.body && Object.prototype.hasOwnProperty.call(req.body, "href")
@@ -1743,7 +1830,7 @@ router.post("/:id/files/replace/sign", requireAdmin, async (req, res) => {
   }
 });
 
-router.post("/:id/files/replace/confirm", requireAdmin, async (req, res) => {
+router.post("/:id/files/replace/confirm", requireCardScopedAdmin, async (req, res) => {
   const { id } = req.params;
   const targetHref = (
     req.body && Object.prototype.hasOwnProperty.call(req.body, "href")
@@ -1877,7 +1964,7 @@ router.post("/:id/files/replace/confirm", requireAdmin, async (req, res) => {
   }
 });
 
-router.post("/:id/files/replace", requireAdmin, async (req, res) => {
+router.post("/:id/files/replace", requireCardScopedAdmin, async (req, res) => {
   const { id } = req.params;
   const targetHref = (
     req.body && Object.prototype.hasOwnProperty.call(req.body, "href")
@@ -1992,7 +2079,7 @@ router.post("/:id/files/replace", requireAdmin, async (req, res) => {
   }
 });
 
-router.post("/:id/files", requireAdmin, async (req, res) => {
+router.post("/:id/files", requireCardScopedAdmin, async (req, res) => {
   const { id } = req.params;
 
   try {
@@ -2113,7 +2200,7 @@ router.post("/:id/files", requireAdmin, async (req, res) => {
   }
 });
 
-router.delete("/:id/files", requireAdmin, async (req, res) => {
+router.delete("/:id/files", requireCardScopedAdmin, async (req, res) => {
   const { id } = req.params;
   const targetHref = (
     req.body && req.body.href ? `${req.body.href}` : ""
@@ -2183,7 +2270,7 @@ router.delete("/:id/files", requireAdmin, async (req, res) => {
   }
 });
 
-router.patch("/:id/files", requireAdmin, async (req, res) => {
+router.patch("/:id/files", requireCardScopedAdmin, async (req, res) => {
   const { id } = req.params;
   const targetHref = (
     req.body && req.body.href ? `${req.body.href}` : ""
@@ -2277,7 +2364,7 @@ router.patch("/:id/files", requireAdmin, async (req, res) => {
   }
 });
 
-router.patch("/:id/files/reorder", requireAdmin, async (req, res) => {
+router.patch("/:id/files/reorder", requireCardScopedAdmin, async (req, res) => {
   const { id } = req.params;
   const rawOrder = Array.isArray(req.body?.hrefs)
     ? req.body.hrefs
@@ -2374,7 +2461,7 @@ router.patch("/:id/files/reorder", requireAdmin, async (req, res) => {
   }
 });
 
-router.post("/:id/video", requireAdmin, async (req, res) => {
+router.post("/:id/video", requireCardScopedAdmin, async (req, res) => {
   const { id } = req.params;
   const position = req.body?.position;
 
@@ -2412,7 +2499,7 @@ router.post("/:id/video", requireAdmin, async (req, res) => {
   }
 });
 
-router.delete("/:id/video", requireAdmin, async (req, res) => {
+router.delete("/:id/video", requireCardScopedAdmin, async (req, res) => {
   const { id } = req.params;
   const index = Number.isInteger(req.body?.index)
     ? req.body.index
@@ -2454,7 +2541,7 @@ router.delete("/:id/video", requireAdmin, async (req, res) => {
   }
 });
 
-router.patch("/:id/video", requireAdmin, async (req, res) => {
+router.patch("/:id/video", requireCardScopedAdmin, async (req, res) => {
   const { id } = req.params;
   const index = Number.isInteger(req.body?.index)
     ? req.body.index

@@ -1063,6 +1063,63 @@ router.post("/login/select-class", async (req, res) => {
     }
 
     const role = followEntry?.role ?? "user";
+    const stripAccents = (value) =>
+      String(value || "")
+        .normalize("NFD")
+        .replace(/[\u0300-\u036f]/g, "")
+        .toLowerCase();
+
+    const toSlug = (value) =>
+      stripAccents(value)
+        .replace(/[^a-z0-9]+/g, "-")
+        .replace(/^-+|-+$/g, "");
+
+    const rawRepertoires = Array.isArray(selectedClass.repertoires)
+      ? selectedClass.repertoires
+      : [];
+
+    const normalizedRepertoires = [];
+    const seenSlugs = new Set();
+    for (const entry of rawRepertoires) {
+      const label =
+        typeof entry === "string"
+          ? entry.trim()
+          : typeof entry?.repertoire === "string"
+          ? entry.repertoire.trim()
+          : "";
+
+      if (!label) continue;
+      const slug = toSlug(label);
+      if (!slug || seenSlugs.has(slug)) continue;
+      seenSlugs.add(slug);
+      normalizedRepertoires.push({ slug, label });
+    }
+
+    const userId = user?._id ? user._id.toString() : null;
+    const teacherSlugs = new Set();
+    if (userId && role !== "admin") {
+      for (const entry of rawRepertoires) {
+        if (!entry || typeof entry !== "object") continue;
+        const label =
+          typeof entry?.repertoire === "string" ? entry.repertoire.trim() : "";
+        if (!label) continue;
+        const slug = toSlug(label);
+        if (!slug) continue;
+        const teachers = Array.isArray(entry?.teachers) ? entry.teachers : [];
+        const isTeacher = teachers.some(
+          (teacherId) =>
+            teacherId && teacherId.toString && teacherId.toString() === userId
+        );
+        if (isTeacher) {
+          teacherSlugs.add(slug);
+        }
+      }
+    }
+
+    const adminRepertoires =
+      role === "admin"
+        ? normalizedRepertoires.map((rep) => rep.slug)
+        : Array.from(teacherSlugs);
 
     const accessToken = jwt.sign(
       {
@@ -1074,7 +1131,8 @@ router.post("/login/select-class", async (req, res) => {
         classId: selectedClass._id,
         publicname: selectedClass.publicname,
         directoryname: selectedClass.directoryname,
-        repertoires: selectedClass.repertoires,
+        repertoires: normalizedRepertoires,
+        adminRepertoires,
       },
       process.env.ACCESS_TOKEN_SECRET,
       { expiresIn: "1h" }
@@ -1092,7 +1150,8 @@ router.post("/login/select-class", async (req, res) => {
       classId: selectedClass._id,
       publicname: selectedClass.publicname,
       directoryname: selectedClass.directoryname,
-      repertoires: selectedClass.repertoires,
+      repertoires: normalizedRepertoires,
+      adminRepertoires,
     });
   } catch (error) {
     if (error.name === "ValidationError") {
@@ -1354,10 +1413,35 @@ router.get("/me", async (req, res) => {
     if (!token) return res.status(401).json({ error: "Non authentifié" });
 
     const decoded = jwt.verify(token, process.env.ACCESS_TOKEN_SECRET);
-    const { email, nom, prenom, role } = decoded;
-    res.json({ user: { email, nom, prenom, role } });
+    const {
+      userId,
+      email,
+      nom,
+      prenom,
+      role,
+      classId,
+      publicname,
+      directoryname,
+      repertoires,
+      adminRepertoires,
+    } = decoded || {};
+
+    res.json({
+      user: {
+        userId,
+        email,
+        nom,
+        prenom,
+        role,
+        classId,
+        publicname,
+        directoryname,
+        repertoires,
+        adminRepertoires,
+      },
+    });
   } catch (err) {
-    res.status(403).json({ error: "Token invalide ou expiré" });
+    res.status(401).json({ error: "Token invalide ou expiré" });
   }
 });
 

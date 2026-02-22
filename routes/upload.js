@@ -3,7 +3,15 @@ var router = express.Router();
 const path = require("path");
 const archiver = require("archiver");
 const { Storage } = require("@google-cloud/storage");
-const { authenticate, authorize, verifyToken,requireAdmin } = require("../middlewares/auth");
+const {
+  authenticate,
+  authorize,
+  verifyToken,
+  requireAdmin,
+  requireScopedAdmin,
+} = require("../middlewares/auth");
+
+const requireUploadScopedAdmin = requireScopedAdmin((req) => req.body?.repertoire);
 
 
 //GESTION du google Storage
@@ -237,7 +245,7 @@ router.post("/recup", authenticate, async (req, res) => {
 
 /* DEBUT téléchargement ZIP de tout un dossier (admin) */
 
-router.post("/downloadZipA", requireAdmin, async (req, res) => {
+router.post("/downloadZipA", requireUploadScopedAdmin, async (req, res) => {
   try {
     const parent = validatePathComponent(req.body.parent, "Dossier parent");
     const repertoire = validatePathComponent(
@@ -316,7 +324,7 @@ router.post("/downloadZipA", requireAdmin, async (req, res) => {
 
 /* DEBUT Lister tous les fichiers qui sont dans le répertoire (admin) */
 
-router.post("/recupA", requireAdmin, async (req, res) => {
+router.post("/recupA", requireUploadScopedAdmin, async (req, res) => {
   try {
     // Validation des champs name , parent et repertoire
     const { nom, prenom, email, role } = req.user;
@@ -579,7 +587,7 @@ router.post("/delete", authenticate, async (req, res) => {
 /* FIN supprimer un fichier */
 
 /* DEBUT supprimer un fichier */
-router.post("/deleteA", requireAdmin, async (req, res) => {
+router.post("/deleteA", requireUploadScopedAdmin, async (req, res) => {
   try {
     const { nom, prenom } = req.user;
     const safeName = `${removeSpaces(nom)}${removeSpaces(prenom)}`;
@@ -682,7 +690,7 @@ router.post("/rename", authenticate, async (req, res) => {
 /* FIN renommer un fichier */
 
 /* DEBUT renommer un fichier en admin*/
-router.post("/renameA", requireAdmin, async (req, res) => {
+router.post("/renameA", requireUploadScopedAdmin, async (req, res) => {
   try {
     const { nom, prenom } = req.user;
     const safeName = `${removeSpaces(nom)}${removeSpaces(prenom)}`;

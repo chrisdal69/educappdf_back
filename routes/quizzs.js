@@ -2,11 +2,41 @@ const express = require("express");
 const router = express.Router();
 const path = require("path");
 const archiver = require("archiver");
+const mongoose = require("mongoose");
 const yup = require("yup");
 const { Storage } = require("@google-cloud/storage");
-const { authenticate, requireAdmin } = require("../middlewares/auth");
+const { authenticate, requireAdmin, requireScopedAdmin } = require("../middlewares/auth");
 const Quizz = require("../models/quizzs");
 const Card = require("../models/cards");
+
+const getCardRepertoire = async (cardId, expectedClassId) => {
+  const trimmed = typeof cardId === "string" ? cardId.trim() : "";
+  if (!trimmed || !mongoose.Types.ObjectId.isValid(trimmed)) return null;
+
+  const classId =
+    typeof expectedClassId === "string" ? expectedClassId.trim() : "";
+  if (classId && !mongoose.Types.ObjectId.isValid(classId)) {
+    return null;
+  }
+
+  const card = await Card.findById(trimmed).select("repertoire classe").lean();
+  if (!card) {
+    return null;
+  }
+
+  if (classId) {
+    const cardClassId = card?.classe ? card.classe.toString() : "";
+    if (!cardClassId || cardClassId !== classId) {
+      return null;
+    }
+  }
+
+  return typeof card?.repertoire === "string" ? card.repertoire.trim() : null;
+};
+
+const requireQuizzScopedAdmin = requireScopedAdmin((req) =>
+  getCardRepertoire(req.params?.id, req.user?.classId)
+);
 
 const NODE_ENV = process.env.NODE_ENV;
 let storage;
@@ -246,7 +276,7 @@ router.get("/historique", authenticate, async (req, res) => {
 
 
 
-router.get("/:id/results", requireAdmin, async (req, res) => {
+router.get("/:id/results", requireQuizzScopedAdmin, async (req, res) => {
   try {
     const { id } = req.params;
 
@@ -280,7 +310,7 @@ router.get("/:id/results", requireAdmin, async (req, res) => {
 });
 
 
-router.get("/:id/results/export", requireAdmin, async (req, res) => {
+router.get("/:id/results/export", requireQuizzScopedAdmin, async (req, res) => {
   try {
     const { id } = req.params;
     const card = await Card.findById(id).select("quizz titre num repertoire").lean();
@@ -344,7 +374,7 @@ router.get("/:id/results/export", requireAdmin, async (req, res) => {
   }
 });
 
-router.get("/:id/export/zip", requireAdmin, async (req, res) => {
+router.get("/:id/export/zip", requireQuizzScopedAdmin, async (req, res) => {
   try {
     const { id } = req.params;
     const card = await Card.findById(id).select("quizz num repertoire").lean();
@@ -538,7 +568,7 @@ router.post("/", authenticate, async (req, res) => {
   }
 });
 
-router.patch("/:id", requireAdmin, async (req, res) => {
+router.patch("/:id", requireQuizzScopedAdmin, async (req, res) => {
   try {
     const { id } = req.params;
     const card = await Card.findById(id).lean();
@@ -606,7 +636,7 @@ router.patch("/:id", requireAdmin, async (req, res) => {
   }
 });
 
-router.post("/:id/image", requireAdmin, async (req, res) => {
+router.post("/:id/image", requireQuizzScopedAdmin, async (req, res) => {
   try {
     const { id } = req.params;
     const questionId = (req.body && req.body.questionId) || "";
@@ -713,7 +743,7 @@ router.post("/:id/image", requireAdmin, async (req, res) => {
   }
 });
 
-router.delete("/:id/image", requireAdmin, async (req, res) => {
+router.delete("/:id/image", requireQuizzScopedAdmin, async (req, res) => {
   try {
     const { id } = req.params;
     const questionId = (req.body && req.body.questionId) || "";

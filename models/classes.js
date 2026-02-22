@@ -30,6 +30,18 @@ const studentSchema = new mongoose.Schema({
   },
 });
 
+const repertoiresSchema = new mongoose.Schema(
+  {
+    repertoire: { type: String, required: true, trim: true },
+    teachers: {
+      type: [{ type: mongoose.Schema.Types.ObjectId, ref: "User" }],
+      default: [],
+    },
+  }
+);
+
+
+
 const classeSchema = new mongoose.Schema({
   directoryname: {
     type: String,
@@ -40,7 +52,7 @@ const classeSchema = new mongoose.Schema({
   },
   publicname: { type: String, required: true, trim: true },
   date: { type: Date, default: Date.now },
-  repertoires: { type: [String], default: [] },
+  repertoires: { type: [repertoiresSchema], default: [] },
   code: { type: String, default: "", select: false },
   codeExpires: { type: Date, default: null, select: false },
   students: { type: [studentSchema], default: [] },
