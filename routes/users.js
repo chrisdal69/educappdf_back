@@ -162,6 +162,17 @@ router.post("/leave-class", authenticate, async (req, res) => {
       console.error("Erreur libération student slot :", err);
     });
 
+    await Classe.updateOne(
+      { _id: classObjectId },
+      { $pull: { "repertoires.$[].teachers": userObjectId } }
+    ).catch((err) => {
+      console.error("Erreur suppression teacher rights :", err);
+    });
+
+    // Le JWT courant est lié à la classe sélectionnée: on le retire.
+    res.clearCookie("jwt", buildCookieOptions());
+    res.clearCookie("pending_login", buildCookieOptions());
+
     return res.status(200).json({ message: "Désinscription réalisée" });
   } catch (error) {
     if (error.name === "ValidationError") {
@@ -232,6 +243,13 @@ router.post("/delete-account", authenticate, async (req, res) => {
         { arrayFilters: [{ "st.id_user": userObjectId }] }
       );
     }
+
+    await Classe.updateMany(
+      { "repertoires.teachers": userObjectId },
+      { $pull: { "repertoires.$[].teachers": userObjectId } }
+    ).catch((err) => {
+      console.error("Erreur suppression teacher rights :", err);
+    });
 
     const deletion = await User.deleteOne({ _id: userObjectId });
     const deleted =
@@ -307,6 +325,152 @@ const handleYupError = (error, res) => {
   res.status(400).json({ errors: validationErrors });
   return true;
 };
+
+const stripAccentsLower = (value) =>
+  String(value || "")
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase();
+
+const toSlug = (value) =>
+  stripAccentsLower(value)
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+
+const adminTeachersSchema = yup.object().shape({
+  classId: objectIdSchema,
+  userId: objectIdSchema,
+  adminRepertoires: yup
+    .array()
+    .of(
+      yup
+        .string()
+        .trim()
+        .matches(/^[a-z0-9-]{1,60}$/, "Repertoire invalide")
+    )
+    .default([]),
+});
+
+router.get("/admin/class/:classId/repertoires", requireAdmin, async (req, res) => {
+  const { classId } = req.params || {};
+  try {
+    await adminClassSchema.validate({ classId }, { abortEarly: false });
+
+    if (!isAdminForClass(req, classId)) {
+      return res.status(403).json({ message: "Classe non autorisÃ©e" });
+    }
+
+    const classe = await Classe.findById(classId).select("repertoires").lean();
+    if (!classe) {
+      return res.status(404).json({ message: "Classe introuvable" });
+    }
+
+    const reps = Array.isArray(classe.repertoires) ? classe.repertoires : [];
+    const repertoires = reps
+      .map((rep) => {
+        const label = typeof rep?.repertoire === "string" ? rep.repertoire.trim() : "";
+        const slug = toSlug(label);
+        if (!label || !slug) return null;
+        const teachers = Array.isArray(rep?.teachers)
+          ? rep.teachers
+              .filter(Boolean)
+              .map((teacherId) =>
+                teacherId?.toString ? teacherId.toString() : String(teacherId)
+              )
+          : [];
+
+        return { slug, label, teachers };
+      })
+      .filter(Boolean);
+
+    return res.status(200).json({ repertoires });
+  } catch (error) {
+    if (handleYupError(error, res)) return;
+    console.error("Erreur admin class repertoires:", error);
+    return res.status(500).json({ message: "Erreur serveur." });
+  }
+});
+
+router.patch(
+  "/admin/class/:classId/repertoires/teachers",
+  requireAdmin,
+  async (req, res) => {
+    const { classId } = req.params || {};
+    const { userId, adminRepertoires } = req.body || {};
+
+    try {
+      await adminTeachersSchema.validate(
+        { classId, userId, adminRepertoires },
+        { abortEarly: false }
+      );
+
+      if (!isAdminForClass(req, classId)) {
+        return res.status(403).json({ message: "Classe non autorisÃ©e" });
+      }
+
+      const classe = await Classe.findById(classId).select("repertoires");
+      if (!classe) {
+        return res.status(404).json({ message: "Classe introuvable" });
+      }
+
+      const selected = new Set(
+        Array.isArray(adminRepertoires) ? adminRepertoires : []
+      );
+      const teacherObjectId = new mongoose.Types.ObjectId(userId);
+      const teacherIdStr = teacherObjectId.toString();
+
+      const reps = Array.isArray(classe.repertoires) ? classe.repertoires : [];
+      reps.forEach((rep) => {
+        const label = typeof rep?.repertoire === "string" ? rep.repertoire.trim() : "";
+        const slug = toSlug(label);
+        if (!slug) return;
+
+        const currentTeachers = Array.isArray(rep.teachers) ? rep.teachers : [];
+        const hasTeacher = currentTeachers.some(
+          (id) => id && id.toString && id.toString() === teacherIdStr
+        );
+
+        if (selected.has(slug)) {
+          if (!hasTeacher) {
+            currentTeachers.push(teacherObjectId);
+          }
+          rep.teachers = currentTeachers;
+          return;
+        }
+
+        if (hasTeacher) {
+          rep.teachers = currentTeachers.filter(
+            (id) => !(id && id.toString && id.toString() === teacherIdStr)
+          );
+        }
+      });
+
+      await classe.save();
+
+      const repertoires = reps
+        .map((rep) => {
+          const label = typeof rep?.repertoire === "string" ? rep.repertoire.trim() : "";
+          const slug = toSlug(label);
+          if (!label || !slug) return null;
+          const teachers = Array.isArray(rep?.teachers)
+            ? rep.teachers
+                .filter(Boolean)
+                .map((teacherId) =>
+                  teacherId?.toString ? teacherId.toString() : String(teacherId)
+                )
+            : [];
+          return { slug, label, teachers };
+        })
+        .filter(Boolean);
+
+      return res.status(200).json({ repertoires });
+    } catch (error) {
+      if (handleYupError(error, res)) return;
+      console.error("Erreur update admin teachers:", error);
+      return res.status(500).json({ message: "Erreur serveur." });
+    }
+  }
+);
 
 router.get("/admin/class/:classId/students", requireAdmin, async (req, res) => {
   const { classId } = req.params || {};
