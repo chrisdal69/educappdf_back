@@ -4,6 +4,7 @@ const path = require("path");
 const archiver = require("archiver");
 const sharp = require("sharp");
 const mongoose = require("mongoose");
+const jwt = require("jsonwebtoken");
 const { Storage } = require("@google-cloud/storage");
 const {
   authenticate,
@@ -16,9 +17,20 @@ const Card = require("../models/cards");
 const Cloud = require("../models/cloud");
 const Quizz = require("../models/quizzs");
 const User = require("../models/users");
+const Classe = require("../models/classes");
 
 const getSingleQueryValue = (value) =>
   Array.isArray(value) ? value[0] : value;
+
+const getOptionalUserFromCookie = (req) => {
+  const token = req?.cookies?.jwt;
+  if (!token) return null;
+  try {
+    return jwt.verify(token, process.env.ACCESS_TOKEN_SECRET);
+  } catch (err) {
+    return null;
+  }
+};
 
 const getCardRepertoireById = async (cardId, expectedClassId) => {
   const trimmed = typeof cardId === "string" ? cardId.trim() : "";
@@ -135,18 +147,63 @@ router.get("/", async (req, res) => {
       return res.status(404).json({ error: "Aucune carte trouvée." });
     }
 
+    const decoded = getOptionalUserFromCookie(req);
+    const userIdRaw =
+      typeof decoded?.userId === "string"
+        ? decoded.userId
+        : decoded?._id
+          ? String(decoded._id)
+          : "";
+    const userId = typeof userIdRaw === "string" ? userIdRaw.trim() : "";
+
+    let exceptionClassIds = new Set();
+    const userObjectId = mongoose.Types.ObjectId.isValid(userId)
+      ? new mongoose.Types.ObjectId(userId)
+      : null;
+
+    if (userObjectId) {
+      const uniqueClassIds = [
+        ...new Set(
+          result
+            .map((card) => (card?.classe ? String(card.classe) : ""))
+            .filter((id) => id && mongoose.Types.ObjectId.isValid(id))
+        ),
+      ];
+
+      if (uniqueClassIds.length) {
+        const exceptionClasses = await Classe.find({
+          _id: { $in: uniqueClassIds },
+          exceptionvisible: userObjectId,
+        })
+          .select("_id")
+          .lean()
+          .exec();
+
+        exceptionClassIds = new Set(
+          (Array.isArray(exceptionClasses) ? exceptionClasses : [])
+            .map((classe) => (classe?._id ? String(classe._id) : ""))
+            .filter(Boolean)
+        );
+      }
+    }
+
     const sanitized = result.map((card) => {
+      const classKey = card?.classe ? String(card.classe) : "";
+      const bypassVisibleFilter = classKey && exceptionClassIds.has(classKey);
       const filteredFiles = Array.isArray(card.fichiers)
-        ? card.fichiers.filter((f) => f && f.visible === true)
+        ? bypassVisibleFilter
+          ? card.fichiers.filter(Boolean)
+          : card.fichiers.filter((f) => f && f.visible === true)
         : card.fichiers;
 
       if (!Array.isArray(card.quizz)) {
-        return { ...card, fichiers: filteredFiles };
+        return { ...card, fichiers: filteredFiles, canSeeHiddenFiles: bypassVisibleFilter };
       }
 
       return {
         ...card,
         fichiers: filteredFiles,
+        canSeeHiddenFiles: bypassVisibleFilter,
         quizz: card.quizz.map((q) => {
           const base = {
             id: q.id,
@@ -161,7 +218,6 @@ router.get("/", async (req, res) => {
         }),
       };
     });
-
     res.json({ result: sanitized });
   } catch (err) {
     console.error("GET /cards", err);

@@ -30,17 +30,13 @@ const studentSchema = new mongoose.Schema({
   },
 });
 
-const repertoiresSchema = new mongoose.Schema(
-  {
-    repertoire: { type: String, required: true, trim: true },
-    teachers: {
-      type: [{ type: mongoose.Schema.Types.ObjectId, ref: "User" }],
-      default: [],
-    },
-  }
-);
-
-
+const repertoiresSchema = new mongoose.Schema({
+  repertoire: { type: String, required: true, trim: true },
+  teachers: {
+    type: [{ type: mongoose.Schema.Types.ObjectId, ref: "User" }],
+    default: [],
+  },
+});
 
 const classeSchema = new mongoose.Schema({
   directoryname: {
@@ -57,6 +53,10 @@ const classeSchema = new mongoose.Schema({
   codeExpires: { type: Date, default: null, select: false },
   students: { type: [studentSchema], default: [] },
   active: { type: Boolean, default: true },
+  exceptionvisible: {
+    type: [{ type: mongoose.Schema.Types.ObjectId, ref: "User" }],
+    default: [],
+  },
 });
 
 module.exports = mongoose.model("Classe", classeSchema);

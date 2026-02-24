@@ -170,6 +170,13 @@ router.post("/leave-class", authenticate, async (req, res) => {
     });
 
     // Le JWT courant est lié à la classe sélectionnée: on le retire.
+    await Classe.updateOne(
+      { _id: classObjectId },
+      { $pull: { exceptionvisible: userObjectId } }
+    ).catch((err) => {
+      console.error("Erreur suppression exceptionvisible :", err);
+    });
+
     res.clearCookie("jwt", buildCookieOptions());
     res.clearCookie("pending_login", buildCookieOptions());
 
@@ -249,6 +256,13 @@ router.post("/delete-account", authenticate, async (req, res) => {
       { $pull: { "repertoires.$[].teachers": userObjectId } }
     ).catch((err) => {
       console.error("Erreur suppression teacher rights :", err);
+    });
+
+    await Classe.updateMany(
+      { exceptionvisible: userObjectId },
+      { $pull: { exceptionvisible: userObjectId } }
+    ).catch((err) => {
+      console.error("Erreur suppression exceptionvisible :", err);
     });
 
     const deletion = await User.deleteOne({ _id: userObjectId });
@@ -349,6 +363,12 @@ const adminTeachersSchema = yup.object().shape({
         .matches(/^[a-z0-9-]{1,60}$/, "Repertoire invalide")
     )
     .default([]),
+});
+
+const adminExceptionVisibleSchema = yup.object().shape({
+  classId: objectIdSchema,
+  userId: objectIdSchema.notRequired(),
+  studentId: objectIdSchema.notRequired(),
 });
 
 router.get("/admin/class/:classId/repertoires", requireAdmin, async (req, res) => {
@@ -472,6 +492,107 @@ router.patch(
   }
 );
 
+router.patch(
+  "/admin/class/:classId/exceptionvisible",
+  requireAdmin,
+  async (req, res) => {
+    const { classId } = req.params || {};
+    const { userId, studentId } = req.body || {};
+
+    try {
+      await adminExceptionVisibleSchema.validate(
+        { classId, userId, studentId },
+        { abortEarly: false }
+      );
+
+      if (!isAdminForClass(req, classId)) {
+        return res.status(403).json({ message: "Classe non autorisée" });
+      }
+
+      const classe = await Classe.findById(classId).select(
+        "students exceptionvisible"
+      );
+      if (!classe) {
+        return res.status(404).json({ message: "Classe introuvable" });
+      }
+
+      const students = Array.isArray(classe?.students) ? classe.students : [];
+
+      let targetUserId = typeof userId === "string" ? userId.trim() : "";
+      const targetStudentId =
+        typeof studentId === "string" ? studentId.trim() : "";
+
+      if (targetStudentId) {
+        const student = students.find(
+          (st) => st?._id && String(st._id) === String(targetStudentId)
+        );
+        if (!student || student?.free !== false || !student?.id_user) {
+          return res.status(400).json({ message: "Utilisateur non inscrit." });
+        }
+        targetUserId = String(student.id_user);
+      }
+
+      if (!mongoose.Types.ObjectId.isValid(targetUserId)) {
+        return res.status(400).json({ message: "Identifiant invalide" });
+      }
+
+      const isRegisteredStudent = students.some((st) => {
+        if (!st || st.free !== false) return false;
+        const id = st.id_user ? String(st.id_user) : "";
+        return id && id === String(targetUserId);
+      });
+
+      if (!isRegisteredStudent) {
+        return res.status(400).json({ message: "Utilisateur non inscrit." });
+      }
+
+      const userObjectId = new mongoose.Types.ObjectId(targetUserId);
+      const userIdStr = userObjectId.toString();
+
+      const registeredUserIds = new Set(
+        students
+          .filter((st) => st?.free === false && st?.id_user)
+          .map((st) => String(st.id_user))
+      );
+
+      const rawCurrent = Array.isArray(classe.exceptionvisible)
+        ? classe.exceptionvisible
+        : [];
+      const current = rawCurrent.filter(
+        (id) => id && id.toString && registeredUserIds.has(id.toString())
+      );
+      if (current.length !== rawCurrent.length) {
+        classe.exceptionvisible = current;
+      }
+      const hasUser = current.some(
+        (id) => id && id.toString && id.toString() === userIdStr
+      );
+
+      if (hasUser) {
+        classe.exceptionvisible = current.filter(
+          (id) => !(id && id.toString && id.toString() === userIdStr)
+        );
+      } else {
+        classe.exceptionvisible = [...current, userObjectId];
+      }
+
+      await classe.save();
+
+      const exceptionvisible = Array.isArray(classe.exceptionvisible)
+        ? classe.exceptionvisible
+            .filter(Boolean)
+            .map((id) => (id?.toString ? id.toString() : String(id)))
+        : [];
+
+      return res.status(200).json({ exceptionvisible, enabled: !hasUser });
+    } catch (error) {
+      if (handleYupError(error, res)) return;
+      console.error("Erreur update exceptionvisible:", error);
+      return res.status(500).json({ message: "Erreur serveur." });
+    }
+  }
+);
+
 router.get("/admin/class/:classId/students", requireAdmin, async (req, res) => {
   const { classId } = req.params || {};
   try {
@@ -481,7 +602,9 @@ router.get("/admin/class/:classId/students", requireAdmin, async (req, res) => {
       return res.status(403).json({ message: "Classe non autorisée" });
     }
 
-    const classe = await Classe.findById(classId).select("students").lean();
+    const classe = await Classe.findById(classId)
+      .select("students exceptionvisible")
+      .lean();
     if (!classe) {
       return res.status(404).json({ message: "Classe introuvable" });
     }
@@ -516,7 +639,13 @@ router.get("/admin/class/:classId/students", requireAdmin, async (req, res) => {
       };
     });
 
-    return res.status(200).json({ students: resolvedStudents });
+    const exceptionvisible = Array.isArray(classe?.exceptionvisible)
+      ? classe.exceptionvisible
+          .filter(Boolean)
+          .map((id) => (id?.toString ? id.toString() : String(id)))
+      : [];
+
+    return res.status(200).json({ students: resolvedStudents, exceptionvisible });
   } catch (error) {
     if (handleYupError(error, res)) return;
     console.error("Erreur admin class students:", error);
@@ -810,6 +939,10 @@ router.delete(
         pullCandidates.push(classObjectId);
 
         await Promise.all([
+          Classe.collection.updateOne(
+            { _id: classObjectId },
+            { $pull: { exceptionvisible: userObjectId } }
+          ),
           User.collection.updateOne(
             { _id: userObjectId },
             { $pull: { follow: { classe: classObjectId } } }
