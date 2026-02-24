@@ -32,6 +32,25 @@ const getOptionalUserFromCookie = (req) => {
   }
 };
 
+const normalizeRepertoireColors = (classe) => {
+  const reps = Array.isArray(classe?.repertoires) ? classe.repertoires : [];
+  return reps
+    .map((rep) => {
+      const repertoire =
+        typeof rep?.repertoire === "string" ? rep.repertoire.trim() : "";
+      if (!repertoire) return null;
+      const bgcolorCandidate =
+        typeof rep?.bgcolor === "string"
+          ? rep.bgcolor.trim()
+          : typeof rep?.bdcolor === "string"
+            ? rep.bdcolor.trim()
+            : "";
+      const bgcolor = bgcolorCandidate;
+      return { repertoire, bgcolor: bgcolor || "#E6EAEA" };
+    })
+    .filter(Boolean);
+};
+
 const getCardRepertoireById = async (cardId, expectedClassId) => {
   const trimmed = typeof cardId === "string" ? cardId.trim() : "";
   if (!trimmed || !mongoose.Types.ObjectId.isValid(trimmed)) {
@@ -218,7 +237,14 @@ router.get("/", async (req, res) => {
         }),
       };
     });
-    res.json({ result: sanitized });
+
+    let repertoires = [];
+    if (classId) {
+      const classe = await Classe.findById(classId).select("repertoires").lean();
+      repertoires = normalizeRepertoireColors(classe);
+    }
+
+    res.json({ result: sanitized, repertoires });
   } catch (err) {
     console.error("GET /cards", err);
     res.status(500).json({ error: "Erreur serveur." });
@@ -258,7 +284,10 @@ router.get(
       return res.status(404).json({ error: "Aucune carte trouvée." });
     }
 
-    res.json({ result });
+    const classe = await Classe.findById(classId).select("repertoires").lean();
+    const repertoires = normalizeRepertoireColors(classe);
+
+    res.json({ result, repertoires });
   } catch (err) {
     console.error("GET /cards/admin", err);
     res.status(500).json({ error: "Erreur serveur." });

@@ -32,6 +32,7 @@ const studentSchema = new mongoose.Schema({
 
 const repertoiresSchema = new mongoose.Schema({
   repertoire: { type: String, required: true, trim: true },
+  bgcolor: { type: String, trim: true ,default:"#E6EAEA"},
   teachers: {
     type: [{ type: mongoose.Schema.Types.ObjectId, ref: "User" }],
     default: [],
