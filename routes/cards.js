@@ -46,7 +46,18 @@ const normalizeRepertoireColors = (classe) => {
             ? rep.bdcolor.trim()
             : "";
       const bgcolor = bgcolorCandidate;
-      return { repertoire, bgcolor: bgcolor || "#E6EAEA" };
+
+      const primaryCandidate =
+        typeof rep?.primary === "string" ? rep.primary.trim() : "";
+      const selectedBgCandidate =
+        typeof rep?.selectedBg === "string" ? rep.selectedBg.trim() : "";
+
+      return {
+        repertoire,
+        bgcolor: bgcolor || "#E6EAEA",
+        primary: primaryCandidate || "#30675f",
+        selectedBg: selectedBgCandidate || "#c2cbcf",
+      };
     })
     .filter(Boolean);
 };
