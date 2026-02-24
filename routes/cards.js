@@ -173,10 +173,6 @@ router.get("/", async (req, res) => {
       .lean()
       .exec();
 
-    if (!result.length) {
-      return res.status(404).json({ error: "Aucune carte trouvée." });
-    }
-
     const decoded = getOptionalUserFromCookie(req);
     const userIdRaw =
       typeof decoded?.userId === "string"
@@ -290,10 +286,6 @@ router.get(
       .sort({ order: -1 })
       .lean()
       .exec();
-
-    if (!result.length) {
-      return res.status(404).json({ error: "Aucune carte trouvée." });
-    }
 
     const classe = await Classe.findById(classId).select("repertoires").lean();
     const repertoires = normalizeRepertoireColors(classe);
