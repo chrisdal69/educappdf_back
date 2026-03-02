@@ -26,7 +26,7 @@ if (NODE_ENV === "production") {
 } else {
   storage = new Storage({ keyFilename: "config/gcs-key.json" });
 }
-const bucketName = process.env.BUCKET_NAME || "mathsapp";
+const bucketName = process.env.BUCKET_NAME || "educapp";
 const fs = require("fs");
 const bucket = storage.bucket(bucketName);
 

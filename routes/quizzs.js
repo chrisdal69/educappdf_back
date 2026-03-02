@@ -8,6 +8,8 @@ const { Storage } = require("@google-cloud/storage");
 const { authenticate, requireAdmin, requireScopedAdmin } = require("../middlewares/auth");
 const Quizz = require("../models/quizzs");
 const Card = require("../models/cards");
+const Classe = require("../models/classes");
+const { getGcsEnvFolder, buildCardPrefix } = require("../modules/gcsPaths");
 
 const getCardRepertoire = async (cardId, expectedClassId) => {
   const trimmed = typeof cardId === "string" ? cardId.trim() : "";
@@ -49,8 +51,24 @@ if (NODE_ENV === "production") {
 } else {
   storage = new Storage({ keyFilename: "config/gcs-key.json" });
 }
-const bucketName = process.env.BUCKET_NAME || "mathsapp";
+const bucketName = process.env.BUCKET_NAME || "educapp";
 const bucket = storage.bucket(bucketName);
+const gcsEnvFolder = getGcsEnvFolder(NODE_ENV);
+
+const buildCardTagPrefix = ({ repertoireSegment, tagNumber, classeSegment }) => {
+  if (!repertoireSegment || tagNumber === null || typeof tagNumber === "undefined") {
+    return "";
+  }
+  if (classeSegment) {
+    return buildCardPrefix({
+      gcsEnvFolder,
+      classe: classeSegment,
+      repertoire: repertoireSegment,
+      tagNumber,
+    });
+  }
+  return `${repertoireSegment}/tag${tagNumber}/`;
+};
 const allowedImageExtensions = new Set([".jpg", ".jpeg", ".png"]);
 
 const quizzSaveSchema = yup.object().shape({
@@ -74,6 +92,21 @@ const sanitizeStorageSegment = (value, label) => {
     throw new Error(`${label} invalide.`);
   }
   return cleaned;
+};
+
+const resolveClasseDirectoryname = async (classeId) => {
+  const id = classeId ? String(classeId).trim() : "";
+  if (!id || !mongoose.Types.ObjectId.isValid(id)) {
+    return null;
+  }
+  try {
+    const classe = await Classe.findById(id).select("directoryname").lean();
+    const directoryname =
+      typeof classe?.directoryname === "string" ? classe.directoryname.trim() : "";
+    return sanitizeStorageSegment(directoryname, "Classe");
+  } catch (error) {
+    return null;
+  }
 };
 
 const normalizeTagNumber = (value) => {
@@ -125,6 +158,11 @@ const isUniformBucketLevelAccessEnabled = async () => {
       metadata?.iamConfiguration?.uniformBucketLevelAccess?.enabled
     );
   } catch (err) {
+    const message = typeof err?.message === "string" ? err.message : "";
+    if (err?.code === 403 && message.includes("storage.buckets.get")) {
+      uniformBucketLevelAccessEnabled = true;
+      return uniformBucketLevelAccessEnabled;
+    }
     console.warn(
       "Impossible de lire la config du bucket; tentative ACL directe.",
       err
@@ -419,9 +457,15 @@ router.get("/:id/export/zip", requireQuizzScopedAdmin, async (req, res) => {
     } catch (error) {
       sanitizedRepertoire = null;
     }
+    const sanitizedClasse = await resolveClasseDirectoryname(card.classe);
     const tagNumber = normalizeTagNumber(card.num);
 
     if (sanitizedRepertoire && tagNumber !== null) {
+      const tagPrefix = buildCardTagPrefix({
+        repertoireSegment: sanitizedRepertoire,
+        tagNumber,
+        classeSegment: sanitizedClasse,
+      });
       const imageNames = new Set();
       reindexedQuizz.forEach((q) => {
         if (q?.image && isAllowedImageName(q.image)) {
@@ -430,7 +474,7 @@ router.get("/:id/export/zip", requireQuizzScopedAdmin, async (req, res) => {
       });
 
       for (const imageName of imageNames) {
-        const objectPath = `${sanitizedRepertoire}/tag${tagNumber}/imagesQuizz/${imageName}`;
+        const objectPath = `${tagPrefix}imagesQuizz/${imageName}`;
         const fileRef = bucket.file(objectPath);
         try {
           const [exists] = await fileRef.exists();
@@ -599,12 +643,18 @@ router.patch("/:id", requireQuizzScopedAdmin, async (req, res) => {
     if (imagesToDelete.length) {
       try {
         const sanitizedRepertoire = sanitizeStorageSegment(card.repertoire, "Repertoire");
+        const sanitizedClasse = await resolveClasseDirectoryname(card.classe);
         const tagNumber = normalizeTagNumber(card.num);
         if (sanitizedRepertoire && tagNumber !== null) {
+          const tagPrefix = buildCardTagPrefix({
+            repertoireSegment: sanitizedRepertoire,
+            tagNumber,
+            classeSegment: sanitizedClasse,
+          });
           await Promise.all(
             imagesToDelete.map((img) =>
               bucket
-                .file(`${sanitizedRepertoire}/tag${tagNumber}/imagesQuizz/${img}`)
+                .file(`${tagPrefix}imagesQuizz/${img}`)
                 .delete({ ignoreNotFound: true })
                 .catch((err) => console.warn("Suppression image quizz orpheline échouée", err))
             )
@@ -675,6 +725,7 @@ router.post("/:id/image", requireQuizzScopedAdmin, async (req, res) => {
     if (!sanitizedRepertoire) {
       return res.status(400).json({ error: "Repertoire manquant." });
     }
+    const sanitizedClasse = await resolveClasseDirectoryname(card.classe);
 
     const tagNumber = normalizeTagNumber(
       req.body && Object.prototype.hasOwnProperty.call(req.body, "num")
@@ -685,9 +736,15 @@ router.post("/:id/image", requireQuizzScopedAdmin, async (req, res) => {
       return res.status(400).json({ error: "Numero de tag invalide." });
     }
 
+    const tagPrefix = buildCardTagPrefix({
+      repertoireSegment: sanitizedRepertoire,
+      tagNumber,
+      classeSegment: sanitizedClasse,
+    });
+
     const { base, ext } = sanitizeFileBaseName(file.name, extension);
     const uniqueName = `${base}_${Date.now()}${ext}`;
-    const objectPath = `${sanitizedRepertoire}/tag${tagNumber}/imagesQuizz/${uniqueName}`;
+    const objectPath = `${tagPrefix}imagesQuizz/${uniqueName}`;
     const fileRef = bucket.file(objectPath);
 
     const normalizedQuizz = sanitizeQuizzArray(card.quizz || []);
@@ -701,7 +758,7 @@ router.post("/:id/image", requireQuizzScopedAdmin, async (req, res) => {
       const safeName = targetQuestion.image;
       if (isSafeFileName(safeName)) {
         const previousFile = bucket.file(
-          `${sanitizedRepertoire}/tag${tagNumber}/imagesQuizz/${safeName}`
+          `${tagPrefix}imagesQuizz/${safeName}`
         );
         previousFile
           .delete({ ignoreNotFound: true })
@@ -774,6 +831,7 @@ router.delete("/:id/image", requireQuizzScopedAdmin, async (req, res) => {
     if (!sanitizedRepertoire) {
       return res.status(400).json({ error: "Repertoire manquant." });
     }
+    const sanitizedClasse = await resolveClasseDirectoryname(card.classe);
     const tagNumber = normalizeTagNumber(
       req.body && Object.prototype.hasOwnProperty.call(req.body, "num")
         ? req.body.num
@@ -783,6 +841,12 @@ router.delete("/:id/image", requireQuizzScopedAdmin, async (req, res) => {
       return res.status(400).json({ error: "Numero de tag invalide." });
     }
 
+    const tagPrefix = buildCardTagPrefix({
+      repertoireSegment: sanitizedRepertoire,
+      tagNumber,
+      classeSegment: sanitizedClasse,
+    });
+
     const normalizedQuizz = sanitizeQuizzArray(card.quizz || []);
     const exists = normalizedQuizz.some(
       (q) => q && q.id === questionId && q.image === image
@@ -791,7 +855,7 @@ router.delete("/:id/image", requireQuizzScopedAdmin, async (req, res) => {
       return res.status(404).json({ error: "Image non trouvee dans le quizz." });
     }
 
-    const objectPath = `${sanitizedRepertoire}/tag${tagNumber}/imagesQuizz/${image}`;
+    const objectPath = `${tagPrefix}imagesQuizz/${image}`;
     try {
       await bucket.file(objectPath).delete({ ignoreNotFound: true });
     } catch (err) {

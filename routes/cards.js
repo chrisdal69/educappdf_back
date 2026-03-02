@@ -18,6 +18,7 @@ const Cloud = require("../models/cloud");
 const Quizz = require("../models/quizzs");
 const User = require("../models/users");
 const Classe = require("../models/classes");
+const { getGcsEnvFolder, buildCardPrefix } = require("../modules/gcsPaths");
 
 const getSingleQueryValue = (value) =>
   Array.isArray(value) ? value[0] : value;
@@ -103,8 +104,24 @@ if (NODE_ENV === "production") {
 } else {
   storage = new Storage({ keyFilename: "config/gcs-key.json" });
 }
-const bucketName = process.env.BUCKET_NAME || "mathsapp";
+const bucketName = process.env.BUCKET_NAME || "educapp";
 const bucket = storage.bucket(bucketName);
+const gcsEnvFolder = getGcsEnvFolder(NODE_ENV);
+
+const buildCardTagPrefix = ({ repertoireSegment, tagNumber, classeSegment }) => {
+  if (!repertoireSegment || tagNumber === null || typeof tagNumber === "undefined") {
+    return "";
+  }
+  if (classeSegment) {
+    return buildCardPrefix({
+      gcsEnvFolder,
+      classe: classeSegment,
+      repertoire: repertoireSegment,
+      tagNumber,
+    });
+  }
+  return `${repertoireSegment}/tag${tagNumber}/`;
+};
 const allowedBgExtensions = new Set([
   ".jpg",
   ".jpeg",
@@ -625,6 +642,7 @@ router.delete("/:id", requireCardScopedAdmin, async (req, res) => {
     }
 
     const sanitizedRepertoire = sanitizeStorageSegment(card.repertoire, "Repertoire");
+    const sanitizedClasse = await resolveClasseDirectoryname(card.classe);
     const tagNumber = normalizeTagNumber(card.num);
 
     await Promise.all([
@@ -633,8 +651,13 @@ router.delete("/:id", requireCardScopedAdmin, async (req, res) => {
       Cloud.deleteMany({ id_card: card._id }),
       (async () => {
         if (sanitizedRepertoire && tagNumber !== null) {
-          const tagSuffix = `tag${Math.trunc(tagNumber)}`;
-          const prefix = `${sanitizedRepertoire}/${tagSuffix}/`;
+          const truncatedTagNumber = Math.trunc(tagNumber);
+          const tagSuffix = `tag${truncatedTagNumber}`;
+          const prefix = buildCardTagPrefix({
+            repertoireSegment: sanitizedRepertoire,
+            tagNumber: truncatedTagNumber,
+            classeSegment: sanitizedClasse,
+          });
           const cloudPrefix = `cloud/${sanitizedRepertoire}${tagSuffix}/`;
           try {
             await bucket.deleteFiles({ prefix });
@@ -789,6 +812,21 @@ const sanitizeStorageSegment = (value, label) => {
     throw new Error(`${label} invalide.`);
   }
   return cleaned;
+};
+
+const resolveClasseDirectoryname = async (classeId) => {
+  const id = classeId ? String(classeId).trim() : "";
+  if (!id || !mongoose.Types.ObjectId.isValid(id)) {
+    return null;
+  }
+  try {
+    const classe = await Classe.findById(id).select("directoryname").lean();
+    const directoryname =
+      typeof classe?.directoryname === "string" ? classe.directoryname.trim() : "";
+    return sanitizeStorageSegment(directoryname, "Classe");
+  } catch (error) {
+    return null;
+  }
 };
 
 const normalizeTagNumber = (value) => {
@@ -955,6 +993,13 @@ const isUniformBucketLevelAccessEnabled = async () => {
       metadata?.iamConfiguration?.uniformBucketLevelAccess?.enabled
     );
   } catch (err) {
+    const message = typeof err?.message === "string" ? err.message : "";
+    if (err?.code === 403 && message.includes("storage.buckets.get")) {
+      // Pas de droit bucket.get => on ne peut pas detecter proprement;
+      // On assume uniforme pour eviter des tentatives ACL inutiles.
+      uniformBucketLevelAccessEnabled = true;
+      return uniformBucketLevelAccessEnabled;
+    }
     console.warn(
       "Impossible de lire la config du bucket; tentative ACL directe.",
       err
@@ -1055,9 +1100,15 @@ router.get("/:id/flash/export/zip", requireCardScopedAdmin, async (req, res) => 
     } catch (error) {
       sanitizedRepertoire = null;
     }
+    const sanitizedClasse = await resolveClasseDirectoryname(card.classe);
     const tagNumber = normalizeTagNumber(card.num);
 
     if (sanitizedRepertoire && tagNumber !== null) {
+      const tagPrefix = buildCardTagPrefix({
+        repertoireSegment: sanitizedRepertoire,
+        tagNumber,
+        classeSegment: sanitizedClasse,
+      });
       const imageNames = new Set();
       reindexedFlash.forEach((item) => {
         if (item?.imquestion && isAllowedFlashImageName(item.imquestion)) {
@@ -1069,7 +1120,7 @@ router.get("/:id/flash/export/zip", requireCardScopedAdmin, async (req, res) => 
       });
 
       for (const imageName of imageNames) {
-        const objectPath = `${sanitizedRepertoire}/tag${tagNumber}/imagesFlash/${imageName}`;
+        const objectPath = `${tagPrefix}imagesFlash/${imageName}`;
         const fileRef = bucket.file(objectPath);
         try {
           const [exists] = await fileRef.exists();
@@ -1213,36 +1264,42 @@ router.delete("/:id/flash", requireCardScopedAdmin, async (req, res) => {
         .json({ error: "Carte introuvable apres suppression." });
     }
 
-    if (imagesToDelete.length) {
-      let sanitizedRepertoire = null;
-      try {
-        sanitizedRepertoire = sanitizeStorageSegment(
-          card.repertoire,
-          "Repertoire"
-        );
-      } catch (validationError) {
-        console.warn(
-          "Repertoire invalide, tentative suppression avec valeur brute.",
-          validationError
-        );
-        sanitizedRepertoire = null;
-      }
-
-      const tagNumber = normalizeTagNumber(card.num);
-      const fallbackRepertoire =
-        typeof card.repertoire === "string" ? card.repertoire.trim() : "";
-      const repertoireSegment = sanitizedRepertoire || fallbackRepertoire;
-      if (repertoireSegment && tagNumber !== null) {
-        const normalizedTagNumber = Math.trunc(tagNumber);
-        const deletions = imagesToDelete
-          .filter((name) => isSafeFileName(name))
-          .map((name) =>
-            bucket
-              .file(
-                `${repertoireSegment}/tag${normalizedTagNumber}/imagesFlash/${name}`
-              )
-              .delete({ ignoreNotFound: true })
+      if (imagesToDelete.length) {
+        let sanitizedRepertoire = null;
+        try {
+          sanitizedRepertoire = sanitizeStorageSegment(
+            card.repertoire,
+            "Repertoire"
           );
+        } catch (validationError) {
+          console.warn(
+            "Repertoire invalide, tentative suppression avec valeur brute.",
+            validationError
+          );
+          sanitizedRepertoire = null;
+        }
+        const sanitizedClasse = await resolveClasseDirectoryname(card.classe);
+
+        const tagNumber = normalizeTagNumber(card.num);
+        const fallbackRepertoire =
+          typeof card.repertoire === "string" ? card.repertoire.trim() : "";
+        const repertoireSegment = sanitizedRepertoire || fallbackRepertoire;
+        if (repertoireSegment && tagNumber !== null) {
+          const normalizedTagNumber = Math.trunc(tagNumber);
+          const tagPrefix = buildCardTagPrefix({
+            repertoireSegment,
+            tagNumber: normalizedTagNumber,
+            classeSegment: sanitizedClasse,
+          });
+          const deletions = imagesToDelete
+            .filter((name) => isSafeFileName(name))
+            .map((name) =>
+              bucket
+                .file(
+                  `${tagPrefix}imagesFlash/${name}`
+                )
+                .delete({ ignoreNotFound: true })
+            );
         const results = await Promise.allSettled(deletions);
         results.forEach((result) => {
           if (result.status === "rejected") {
@@ -1314,6 +1371,7 @@ router.post("/:id/flash/image", requireCardScopedAdmin, async (req, res) => {
     if (!sanitizedRepertoire) {
       return res.status(400).json({ error: "Repertoire manquant." });
     }
+    const sanitizedClasse = await resolveClasseDirectoryname(card.classe);
 
     const tagNumber = normalizeTagNumber(
       req.body && Object.prototype.hasOwnProperty.call(req.body, "num")
@@ -1324,9 +1382,14 @@ router.post("/:id/flash/image", requireCardScopedAdmin, async (req, res) => {
       return res.status(400).json({ error: "Numero de tag invalide." });
     }
 
+    const tagPrefix = buildCardTagPrefix({
+      repertoireSegment: sanitizedRepertoire,
+      tagNumber,
+      classeSegment: sanitizedClasse,
+    });
     const { base, ext } = sanitizeFileBaseName(file.name, extension);
     const uniqueName = `${base}_${Date.now()}${ext}`;
-    const objectPath = `${sanitizedRepertoire}/tag${tagNumber}/imagesFlash/${uniqueName}`;
+    const objectPath = `${tagPrefix}imagesFlash/${uniqueName}`;
     const fileRef = bucket.file(objectPath);
 
     const normalizedFlash = sanitizeFlashArray(card.flash || []);
@@ -1340,7 +1403,7 @@ router.post("/:id/flash/image", requireCardScopedAdmin, async (req, res) => {
       const safeName = targetFlash[field];
       if (isSafeFileName(safeName)) {
         const previousFile = bucket.file(
-          `${sanitizedRepertoire}/tag${tagNumber}/imagesFlash/${safeName}`
+          `${tagPrefix}imagesFlash/${safeName}`
         );
         previousFile
           .delete({ ignoreNotFound: true })
@@ -1417,6 +1480,7 @@ router.delete("/:id/flash/image", requireCardScopedAdmin, async (req, res) => {
     if (!sanitizedRepertoire) {
       return res.status(400).json({ error: "Repertoire manquant." });
     }
+    const sanitizedClasse = await resolveClasseDirectoryname(card.classe);
 
     const tagNumber = normalizeTagNumber(
       req.body && Object.prototype.hasOwnProperty.call(req.body, "num")
@@ -1427,6 +1491,12 @@ router.delete("/:id/flash/image", requireCardScopedAdmin, async (req, res) => {
       return res.status(400).json({ error: "Numero de tag invalide." });
     }
 
+    const tagPrefix = buildCardTagPrefix({
+      repertoireSegment: sanitizedRepertoire,
+      tagNumber,
+      classeSegment: sanitizedClasse,
+    });
+
     const normalizedFlash = sanitizeFlashArray(card.flash || []);
     const exists = normalizedFlash.some(
       (q) => q && q.id === flashId && q[field] === image
@@ -1435,7 +1505,7 @@ router.delete("/:id/flash/image", requireCardScopedAdmin, async (req, res) => {
       return res.status(404).json({ error: "Image non trouvee dans le flash." });
     }
 
-    const objectPath = `${sanitizedRepertoire}/tag${tagNumber}/imagesFlash/${image}`;
+    const objectPath = `${tagPrefix}imagesFlash/${image}`;
     try {
       await bucket.file(objectPath).delete({ ignoreNotFound: true });
     } catch (err) {
@@ -1507,6 +1577,8 @@ router.post("/:id/bg/upload", requireCardScopedAdmin, async (req, res) => {
       return res.status(400).json({ error: "Répertoire manquant." });
     }
 
+    const sanitizedClasse = await resolveClasseDirectoryname(card.classe);
+
     const rawNum =
       req.body && Object.prototype.hasOwnProperty.call(req.body, "num")
         ? req.body.num
@@ -1516,6 +1588,11 @@ router.post("/:id/bg/upload", requireCardScopedAdmin, async (req, res) => {
       return res.status(400).json({ error: "Numéro de tag invalide." });
     }
     const normalizedTagNumber = Math.trunc(tagNumber);
+    const tagPrefix = buildCardTagPrefix({
+      repertoireSegment: sanitizedRepertoire,
+      tagNumber: normalizedTagNumber,
+      classeSegment: sanitizedClasse,
+    });
 
     const safeBaseName = path
       .basename(uploadedFile.name || "background", extension)
@@ -1526,14 +1603,14 @@ router.post("/:id/bg/upload", requireCardScopedAdmin, async (req, res) => {
     const uniqueBase = `${finalBase}_${Date.now()}`;
     const uniqueName = `${uniqueBase}${extension}`;
     const blurName = `${uniqueBase}Blur${extension}`;
-    const objectPath = `${sanitizedRepertoire}/tag${normalizedTagNumber}/${uniqueName}`;
-    const blurPath = `${sanitizedRepertoire}/tag${normalizedTagNumber}/${blurName}`;
+    const objectPath = `${tagPrefix}${uniqueName}`;
+    const blurPath = `${tagPrefix}${blurName}`;
     const fileRef = bucket.file(objectPath);
     const blurRef = bucket.file(blurPath);
 
     if (card.bg) {
       const previousFile = bucket.file(
-        `${sanitizedRepertoire}/tag${normalizedTagNumber}/${card.bg}`
+        `${tagPrefix}${card.bg}`
       );
       previousFile
         .delete({ ignoreNotFound: true })
@@ -1544,7 +1621,7 @@ router.post("/:id/bg/upload", requireCardScopedAdmin, async (req, res) => {
       const prevBlurName = toBlurFileName(card.bg);
       if (prevBlurName) {
         const prevBlurFile = bucket.file(
-          `${sanitizedRepertoire}/tag${normalizedTagNumber}/${prevBlurName}`
+          `${tagPrefix}${prevBlurName}`
         );
         prevBlurFile
           .delete({ ignoreNotFound: true })
@@ -1618,6 +1695,8 @@ router.post("/:id/files/sign", requireCardScopedAdmin, async (req, res) => {
       return res.status(404).json({ error: "Carte introuvable." });
     }
 
+    const sanitizedClasse = await resolveClasseDirectoryname(card.classe);
+
     const rawExtension = path.extname(rawName || "").toLowerCase();
     const { ext, base } = sanitizeFileBaseName(rawName, rawExtension);
     if (!ext || !allowedFileExtensions.has(ext)) {
@@ -1650,9 +1729,14 @@ router.post("/:id/files/sign", requireCardScopedAdmin, async (req, res) => {
       return res.status(400).json({ error: "Numero de tag invalide." });
     }
     const normalizedTagNumber = Math.trunc(tagNumber);
+    const tagPrefix = buildCardTagPrefix({
+      repertoireSegment: sanitizedRepertoire,
+      tagNumber: normalizedTagNumber,
+      classeSegment: sanitizedClasse,
+    });
 
     const uniqueName = `${base}_${Date.now()}${ext}`;
-    const objectPath = `${sanitizedRepertoire}/tag${normalizedTagNumber}/${uniqueName}`;
+    const objectPath = `${tagPrefix}${uniqueName}`;
     const fileRef = bucket.file(objectPath);
     const contentType = rawType || "application/octet-stream";
 
@@ -1714,6 +1798,8 @@ router.post("/:id/files/confirm", requireCardScopedAdmin, async (req, res) => {
       return res.status(404).json({ error: "Carte introuvable." });
     }
 
+    const sanitizedClasse = await resolveClasseDirectoryname(card.classe);
+
     const targetRepertoire =
       (req.body && req.body.repertoire) || card.repertoire;
     let sanitizedRepertoire;
@@ -1738,8 +1824,13 @@ router.post("/:id/files/confirm", requireCardScopedAdmin, async (req, res) => {
       return res.status(400).json({ error: "Numero de tag invalide." });
     }
     const normalizedTagNumber = Math.trunc(tagNumber);
+    const tagPrefix = buildCardTagPrefix({
+      repertoireSegment: sanitizedRepertoire,
+      tagNumber: normalizedTagNumber,
+      classeSegment: sanitizedClasse,
+    });
 
-    const objectPath = `${sanitizedRepertoire}/tag${normalizedTagNumber}/${rawFileName}`;
+    const objectPath = `${tagPrefix}${rawFileName}`;
     const fileRef = bucket.file(objectPath);
     const [exists] = await fileRef.exists();
     if (!exists) {
@@ -1883,14 +1974,20 @@ router.post("/:id/files/replace/sign", requireCardScopedAdmin, async (req, res) 
     if (!sanitizedRepertoire) {
       return res.status(400).json({ error: "Repertoire manquant." });
     }
+    const sanitizedClasse = await resolveClasseDirectoryname(card.classe);
     const tagNumber = normalizeTagNumber(card.num);
     if (tagNumber === null) {
       return res.status(400).json({ error: "Numero de tag invalide." });
     }
     const normalizedTagNumber = Math.trunc(tagNumber);
+    const tagPrefix = buildCardTagPrefix({
+      repertoireSegment: sanitizedRepertoire,
+      tagNumber: normalizedTagNumber,
+      classeSegment: sanitizedClasse,
+    });
 
     const uniqueName = `${base}_${Date.now()}${ext}`;
-    const objectPath = `${sanitizedRepertoire}/tag${normalizedTagNumber}/${uniqueName}`;
+    const objectPath = `${tagPrefix}${uniqueName}`;
     const fileRef = bucket.file(objectPath);
     const contentType = rawType || "application/octet-stream";
 
@@ -1973,13 +2070,19 @@ router.post("/:id/files/replace/confirm", requireCardScopedAdmin, async (req, re
     if (!sanitizedRepertoire) {
       return res.status(400).json({ error: "Repertoire manquant." });
     }
+    const sanitizedClasse = await resolveClasseDirectoryname(card.classe);
     const tagNumber = normalizeTagNumber(card.num);
     if (tagNumber === null) {
       return res.status(400).json({ error: "Numero de tag invalide." });
     }
     const normalizedTagNumber = Math.trunc(tagNumber);
+    const tagPrefix = buildCardTagPrefix({
+      repertoireSegment: sanitizedRepertoire,
+      tagNumber: normalizedTagNumber,
+      classeSegment: sanitizedClasse,
+    });
 
-    const objectPath = `${sanitizedRepertoire}/tag${normalizedTagNumber}/${rawFileName}`;
+    const objectPath = `${tagPrefix}${rawFileName}`;
     const fileRef = bucket.file(objectPath);
     const [exists] = await fileRef.exists();
     if (!exists) {
@@ -2032,7 +2135,7 @@ router.post("/:id/files/replace/confirm", requireCardScopedAdmin, async (req, re
         .json({ error: "Carte introuvable apres remplacement." });
     }
 
-    const oldPath = `${sanitizedRepertoire}/tag${normalizedTagNumber}/${targetHref}`;
+    const oldPath = `${tagPrefix}${targetHref}`;
     try {
       await bucket.file(oldPath).delete({ ignoreNotFound: true });
     } catch (err) {
@@ -2112,14 +2215,20 @@ router.post("/:id/files/replace", requireCardScopedAdmin, async (req, res) => {
     if (!sanitizedRepertoire) {
       return res.status(400).json({ error: "Repertoire manquant." });
     }
+    const sanitizedClasse = await resolveClasseDirectoryname(card.classe);
     const tagNumber = normalizeTagNumber(card.num);
     if (tagNumber === null) {
       return res.status(400).json({ error: "Numero de tag invalide." });
     }
     const normalizedTagNumber = Math.trunc(tagNumber);
+    const tagPrefix = buildCardTagPrefix({
+      repertoireSegment: sanitizedRepertoire,
+      tagNumber: normalizedTagNumber,
+      classeSegment: sanitizedClasse,
+    });
 
     const uniqueName = `${base}_${Date.now()}${ext}`;
-    const objectPath = `${sanitizedRepertoire}/tag${normalizedTagNumber}/${uniqueName}`;
+    const objectPath = `${tagPrefix}${uniqueName}`;
     const fileRef = bucket.file(objectPath);
 
     await uploadBufferToBucket(fileRef, uploadedFile.data, uploadedFile.mimetype);
@@ -2147,7 +2256,7 @@ router.post("/:id/files/replace", requireCardScopedAdmin, async (req, res) => {
         .json({ error: "Carte introuvable apres remplacement." });
     }
 
-    const oldPath = `${sanitizedRepertoire}/tag${normalizedTagNumber}/${targetHref}`;
+    const oldPath = `${tagPrefix}${targetHref}`;
     try {
       await bucket.file(oldPath).delete({ ignoreNotFound: true });
     } catch (err) {
@@ -2224,6 +2333,8 @@ router.post("/:id/files", requireCardScopedAdmin, async (req, res) => {
       return res.status(400).json({ error: "R\u00e9pertoire manquant." });
     }
 
+    const sanitizedClasse = await resolveClasseDirectoryname(card.classe);
+
     const rawNum =
       req.body && Object.prototype.hasOwnProperty.call(req.body, "num")
         ? req.body.num
@@ -2233,9 +2344,14 @@ router.post("/:id/files", requireCardScopedAdmin, async (req, res) => {
       return res.status(400).json({ error: "Num\u00e9ro de tag invalide." });
     }
     const normalizedTagNumber = Math.trunc(tagNumber);
+    const tagPrefix = buildCardTagPrefix({
+      repertoireSegment: sanitizedRepertoire,
+      tagNumber: normalizedTagNumber,
+      classeSegment: sanitizedClasse,
+    });
 
     const uniqueName = `${base}_${Date.now()}${ext}`;
-    const objectPath = `${sanitizedRepertoire}/tag${normalizedTagNumber}/${uniqueName}`;
+    const objectPath = `${tagPrefix}${uniqueName}`;
     const fileRef = bucket.file(objectPath);
 
     await uploadBufferToBucket(
@@ -2314,11 +2430,17 @@ router.delete("/:id/files", requireCardScopedAdmin, async (req, res) => {
     if (!sanitizedRepertoire) {
       return res.status(400).json({ error: "R\u00e9pertoire manquant." });
     }
+    const sanitizedClasse = await resolveClasseDirectoryname(card.classe);
     const tagNumber = normalizeTagNumber(card.num);
     if (tagNumber === null) {
       return res.status(400).json({ error: "Num\u00e9ro de tag invalide." });
     }
     const normalizedTagNumber = Math.trunc(tagNumber);
+    const tagPrefix = buildCardTagPrefix({
+      repertoireSegment: sanitizedRepertoire,
+      tagNumber: normalizedTagNumber,
+      classeSegment: sanitizedClasse,
+    });
 
     const existsInCard = Array.isArray(card.fichiers)
       ? card.fichiers.some((f) => f && f.href === targetHref)
@@ -2329,7 +2451,7 @@ router.delete("/:id/files", requireCardScopedAdmin, async (req, res) => {
         .json({ error: "Fichier non trouv\u00e9 dans la carte." });
     }
 
-    const objectPath = `${sanitizedRepertoire}/tag${normalizedTagNumber}/${targetHref}`;
+    const objectPath = `${tagPrefix}${targetHref}`;
     try {
       const fileRef = bucket.file(objectPath);
       await fileRef.delete({ ignoreNotFound: true });
