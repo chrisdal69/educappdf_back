@@ -2,6 +2,7 @@
 var router = express.Router();
 const path = require("path");
 const archiver = require("archiver");
+const mongoose = require("mongoose");
 const { Storage } = require("@google-cloud/storage");
 const {
   authenticate,
@@ -10,8 +11,16 @@ const {
   requireAdmin,
   requireScopedAdmin,
 } = require("../middlewares/auth");
+const Classe = require("../models/classes");
+const { getGcsEnvFolder, buildCardPrefix } = require("../modules/gcsPaths");
 
-const requireUploadScopedAdmin = requireScopedAdmin((req) => req.body?.repertoire);
+const requireUploadScopedAdmin = requireScopedAdmin((req) => {
+  const { repertoire } = parseCloudRepertoireAndNum({
+    repertoireRaw: req.body?.repertoire,
+    numRaw: req.body?.num,
+  });
+  return repertoire;
+});
 
 
 //GESTION du google Storage
@@ -29,6 +38,7 @@ if (NODE_ENV === "production") {
 const bucketName = process.env.BUCKET_NAME || "educapp";
 const fs = require("fs");
 const bucket = storage.bucket(bucketName);
+const gcsEnvFolder = getGcsEnvFolder(NODE_ENV);
 
 // Extensions autorisés
 const allowedExtensions = [
@@ -60,8 +70,12 @@ const stripPrefix = (name = "") => {
 router.get("/download", authenticate, async (req, res) => {
   try {
     const parent = validatePathComponent(req.query.parent, "Dossier parent");
-    const repertoire = validatePathComponent(
-      req.query.repertoire,
+    const { repertoire, num } = parseCloudRepertoireAndNum({
+      repertoireRaw: req.query.repertoire,
+      numRaw: req.query.num,
+    });
+    const sanitizedRepertoire = validatePathComponent(
+      repertoire,
       "Nom de répertoire"
     );
     const file = validateFileName(req.query.file, "Nom de fichier");
@@ -72,7 +86,14 @@ router.get("/download", authenticate, async (req, res) => {
         .json({ error: "Dossier parent non autorisé." });
     }
 
-    const objectPath = `${parent}/${repertoire}/${file}`;
+    const objectPath =
+      parent === "cloud"
+        ? `${await buildCloudFolderPrefix({
+            user: req.user,
+            repertoire: sanitizedRepertoire,
+            num,
+          })}${file}`
+        : `${parent}/${sanitizedRepertoire}/${file}`;
     const fileRef = bucket.file(objectPath);
     const [exists] = await fileRef.exists();
     if (!exists) {
@@ -200,19 +221,30 @@ router.post("/recup", authenticate, async (req, res) => {
     const { nom, prenom, email, role } = req.user;
     const safeName = `${removeSpaces(nom)}${removeSpaces(prenom)}`;
     const parent = validatePathComponent(req.body.parent, "Dossier parent");
-    const repertoire = validatePathComponent(
-      req.body.repertoire,
+    const { repertoire, num } = parseCloudRepertoireAndNum({
+      repertoireRaw: req.body.repertoire,
+      numRaw: req.body.num,
+    });
+    const sanitizedRepertoire = validatePathComponent(
+      repertoire,
       "Nom de répertoire"
     );
     // Whitelist de parent (cohérente avec l'upload)
     if (!allowedParents.includes(parent)) {
       return res.status(403).send("Dossier parent non autorisé.");
     }
-    const repertoireBucket = `${parent}/${repertoire}`;
+    const repertoireBucket =
+      parent === "cloud"
+        ? await buildCloudFolderPrefix({
+            user: req.user,
+            repertoire: sanitizedRepertoire,
+            num,
+          })
+        : `${parent}/${sanitizedRepertoire}/`;
 
     // On cible le  répertoire
     const [files] = await bucket.getFiles({
-      prefix: `${repertoireBucket}/`, // dossier cible
+      prefix: repertoireBucket, // dossier cible
       delimiter: "/", // permet d'éviter de descendre dans des sous-dossiers
     });
 
@@ -248,8 +280,12 @@ router.post("/recup", authenticate, async (req, res) => {
 router.post("/downloadZipA", requireUploadScopedAdmin, async (req, res) => {
   try {
     const parent = validatePathComponent(req.body.parent, "Dossier parent");
-    const repertoire = validatePathComponent(
-      req.body.repertoire,
+    const { repertoire, num } = parseCloudRepertoireAndNum({
+      repertoireRaw: req.body.repertoire,
+      numRaw: req.body.num,
+    });
+    const sanitizedRepertoire = validatePathComponent(
+      repertoire,
       "Nom de répertoire"
     );
     if (!allowedParents.includes(parent)) {
@@ -258,7 +294,14 @@ router.post("/downloadZipA", requireUploadScopedAdmin, async (req, res) => {
         .json({ success: false, message: "Dossier parent non autorisé" });
     }
 
-    const prefix = `${parent}/${repertoire}/`;
+    const prefix =
+      parent === "cloud"
+        ? await buildCloudFolderPrefix({
+            user: req.user,
+            repertoire: sanitizedRepertoire,
+            num,
+          })
+        : `${parent}/${sanitizedRepertoire}/`;
     const [files] = await bucket.getFiles({
       prefix,
       delimiter: "/",
@@ -273,7 +316,11 @@ router.post("/downloadZipA", requireUploadScopedAdmin, async (req, res) => {
       });
     }
 
-    const archiveName = `${repertoire}.zip`.replace(
+    const archiveBase =
+      parent === "cloud" && num !== null
+        ? `${sanitizedRepertoire}tag${num}`
+        : sanitizedRepertoire;
+    const archiveName = `${archiveBase}.zip`.replace(
       /[^a-zA-Z0-9._-]/g,
       "_"
     );
@@ -329,19 +376,30 @@ router.post("/recupA", requireUploadScopedAdmin, async (req, res) => {
     // Validation des champs name , parent et repertoire
     const { nom, prenom, email, role } = req.user;
     const parent = validatePathComponent(req.body.parent, "Dossier parent");
-    const repertoire = validatePathComponent(
-      req.body.repertoire,
+    const { repertoire, num } = parseCloudRepertoireAndNum({
+      repertoireRaw: req.body.repertoire,
+      numRaw: req.body.num,
+    });
+    const sanitizedRepertoire = validatePathComponent(
+      repertoire,
       "Nom de répertoire"
     );
     // Whitelist de parent (cohérente avec l'upload)
     if (!allowedParents.includes(parent)) {
       return res.status(403).send("Dossier parent non autorisé.");
     }
-    const repertoireBucket = `${parent}/${repertoire}`;
+    const repertoireBucket =
+      parent === "cloud"
+        ? await buildCloudFolderPrefix({
+            user: req.user,
+            repertoire: sanitizedRepertoire,
+            num,
+          })
+        : `${parent}/${sanitizedRepertoire}/`;
 
     // On cible le  répertoire
     const [files] = await bucket.getFiles({
-      prefix: `${repertoireBucket}/`, // dossier cible
+      prefix: repertoireBucket, // dossier cible
       delimiter: "/", // permet d'éviter de descendre dans des sous-dossiers
     });
 
@@ -404,6 +462,68 @@ function validatePathComponent(value, label) {
   return cleaned;
 }
 
+const resolveClasseDirectoryname = async (classeId) => {
+  const id = classeId ? String(classeId).trim() : "";
+  if (!id || !mongoose.Types.ObjectId.isValid(id)) {
+    return null;
+  }
+  try {
+    const classe = await Classe.findById(id).select("directoryname").lean();
+    const directoryname =
+      typeof classe?.directoryname === "string" ? classe.directoryname.trim() : "";
+    return validatePathComponent(directoryname, "Nom de classe");
+  } catch (error) {
+    return null;
+  }
+};
+
+const parseTagNumber = (value) => {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return null;
+  const truncated = Math.trunc(n);
+  if (truncated < 0 || truncated > 100000) return null;
+  return truncated;
+};
+
+const parseCloudRepertoireAndNum = ({ repertoireRaw, numRaw }) => {
+  const repValue = typeof repertoireRaw === "string" ? repertoireRaw.trim() : "";
+  const num = parseTagNumber(numRaw);
+  if (repValue && num !== null) {
+    return { repertoire: repValue, num };
+  }
+
+  // Compat anciens clients: repertoire = `${repertoire}tag${num}`
+  const match = repValue.match(/^(.*)tag(\d{1,6})$/);
+  if (!match) {
+    return { repertoire: repValue, num: null };
+  }
+  const rep = match[1] || "";
+  const parsedNum = parseTagNumber(match[2]);
+  if (!rep || parsedNum === null) {
+    return { repertoire: repValue, num: null };
+  }
+  return { repertoire: rep, num: parsedNum };
+};
+
+const buildCloudFolderPrefix = async ({ user, repertoire, num }) => {
+  const sanitizedRepertoire = validatePathComponent(repertoire, "Nom de répertoire");
+  const tagNumber = parseTagNumber(num);
+  if (tagNumber === null) {
+    throw new Error("Numero de tag invalide.");
+  }
+  const directoryname = await resolveClasseDirectoryname(user?.classId);
+  if (!directoryname) {
+    throw new Error("Classe non selectionnee.");
+  }
+  const basePrefix = buildCardPrefix({
+    gcsEnvFolder,
+    classe: directoryname,
+    repertoire: sanitizedRepertoire,
+    tagNumber,
+  });
+  return `${basePrefix}cloud/`;
+};
+
 function removeSpaces(str) {
   if (typeof str !== "string") return "";
 
@@ -450,17 +570,33 @@ router.post("/", authenticate, async (req, res) => {
   try {
     // Validation parent et repertoire
     const parent = validatePathComponent(req.body.parent, "Dossier parent");
-    const repertoire = validatePathComponent(
-      req.body.repertoire,
+    const { repertoire, num } = parseCloudRepertoireAndNum({
+      repertoireRaw: req.body.repertoire,
+      numRaw: req.body.num,
+    });
+    const sanitizedRepertoire = validatePathComponent(
+      repertoire,
       "Nom de répertoire"
     );
     // (Optionnel) Restreindre à une liste blanche
     if (!allowedParents.includes(parent)) {
       return res.status(403).send("Dossier parent non autorisé.");
     }
-    // Création du répertoire public si besoin
-    await createPublicFolder(parent, repertoire);
-    const repertoireBucket = `${parent}/${repertoire}`;
+
+    let repertoireBucket = `${parent}/${sanitizedRepertoire}`;
+    if (parent === "cloud") {
+      const cloudFolderPrefix = await buildCloudFolderPrefix({
+        user: req.user,
+        repertoire: sanitizedRepertoire,
+        num,
+      });
+      const cloudParent = cloudFolderPrefix.replace(/\/cloud\/$/, "");
+      await createPublicFolder(cloudParent, "cloud");
+      repertoireBucket = cloudFolderPrefix.replace(/\/$/, "");
+    } else {
+      // Création du répertoire public si besoin
+      await createPublicFolder(parent, sanitizedRepertoire);
+    }
     // Préfixe du user devant le fichier
     const { nom, prenom, email, role } = req.user;
     const safeName = `${removeSpaces(nom)}${removeSpaces(prenom)}`;
@@ -552,10 +688,14 @@ router.post("/delete", authenticate, async (req, res) => {
     const safeName = `${removeSpaces(nom)}${removeSpaces(prenom)}`;
 
     const parent = validatePathComponent(req.body.parent, "Dossier parent");
-    const repertoire = validatePathComponent(req.body.repertoire, "Nom de répertoire");
+    const { repertoire, num } = parseCloudRepertoireAndNum({
+      repertoireRaw: req.body.repertoire,
+      numRaw: req.body.num,
+    });
+    const sanitizedRepertoire = validatePathComponent(repertoire, "Nom de répertoire");
     const file = validateFileName(req.body.file, "Nom de fichier");
 
-    if (!parent || !repertoire || !file) {
+    if (!parent || !sanitizedRepertoire || !file) {
       return res
         .status(400)
         .json({ success: false, message: "Données manquantes" });
@@ -569,7 +709,14 @@ router.post("/delete", authenticate, async (req, res) => {
       return res.status(403).json({ success: false, message: "Accés refusé" });
     }
 
-    const filePath = `${parent}/${repertoire}/${file}`;
+    const filePath =
+      parent === "cloud"
+        ? `${await buildCloudFolderPrefix({
+            user: req.user,
+            repertoire: sanitizedRepertoire,
+            num,
+          })}${file}`
+        : `${parent}/${sanitizedRepertoire}/${file}`;
     const fileRef = bucket.file(filePath);
     await fileRef.delete();
 
@@ -593,10 +740,14 @@ router.post("/deleteA", requireUploadScopedAdmin, async (req, res) => {
     const safeName = `${removeSpaces(nom)}${removeSpaces(prenom)}`;
 
     const parent = validatePathComponent(req.body.parent, "Dossier parent");
-    const repertoire = validatePathComponent(req.body.repertoire, "Nom de répertoire");
+    const { repertoire, num } = parseCloudRepertoireAndNum({
+      repertoireRaw: req.body.repertoire,
+      numRaw: req.body.num,
+    });
+    const sanitizedRepertoire = validatePathComponent(repertoire, "Nom de répertoire");
     const file = validateFileName(req.body.file, "Nom de fichier");
 
-    if (!parent || !repertoire || !file) {
+    if (!parent || !sanitizedRepertoire || !file) {
       return res
         .status(400)
         .json({ success: false, message: "Données manquantes" });
@@ -606,7 +757,14 @@ router.post("/deleteA", requireUploadScopedAdmin, async (req, res) => {
       return res.status(403).json({ success: false, message: "Dossier parent non autorisé" });
     }
 
-    const filePath = `${parent}/${repertoire}/${file}`;
+    const filePath =
+      parent === "cloud"
+        ? `${await buildCloudFolderPrefix({
+            user: req.user,
+            repertoire: sanitizedRepertoire,
+            num,
+          })}${file}`
+        : `${parent}/${sanitizedRepertoire}/${file}`;
     const fileRef = bucket.file(filePath);
     await fileRef.delete();
 
@@ -634,11 +792,15 @@ router.post("/rename", authenticate, async (req, res) => {
     const safeName = `${removeSpaces(nom)}${removeSpaces(prenom)}`;
 
     const parent = validatePathComponent(req.body.parent, "Dossier parent");
-    const repertoire = validatePathComponent(req.body.repertoire, "Nom de répertoire");
+    const { repertoire, num } = parseCloudRepertoireAndNum({
+      repertoireRaw: req.body.repertoire,
+      numRaw: req.body.num,
+    });
+    const sanitizedRepertoire = validatePathComponent(repertoire, "Nom de répertoire");
     const oldName = validateFileName(req.body.oldName, "Ancien nom");
     const newName = validateFileName(req.body.newName, "Nouveau nom");
 
-    if (!parent || !repertoire || !oldName || !newName) {
+    if (!parent || !sanitizedRepertoire || !oldName || !newName) {
       return res
         .status(400)
         .json({ success: false, message: "Données manquantes" });
@@ -655,9 +817,18 @@ router.post("/rename", authenticate, async (req, res) => {
       return res.status(400).json({ success: false, message: "Extension non autorisée" });
     }
 
-    const oldPath = `${parent}/${repertoire}/${oldName}`;
+    const basePrefix =
+      parent === "cloud"
+        ? await buildCloudFolderPrefix({
+            user: req.user,
+            repertoire: sanitizedRepertoire,
+            num,
+          })
+        : `${parent}/${sanitizedRepertoire}/`;
+
+    const oldPath = `${basePrefix}${oldName}`;
     const racine = oldName.split('___')[0];
-    const newPath = `${parent}/${repertoire}/${racine}___${newName}`;
+    const newPath = `${basePrefix}${racine}___${newName}`;
     
     const oldFile = bucket.file(oldPath);
     const newFile = bucket.file(newPath);
@@ -696,11 +867,15 @@ router.post("/renameA", requireUploadScopedAdmin, async (req, res) => {
     const safeName = `${removeSpaces(nom)}${removeSpaces(prenom)}`;
 
     const parent = validatePathComponent(req.body.parent, "Dossier parent");
-    const repertoire = validatePathComponent(req.body.repertoire, "Nom de répertoire");
+    const { repertoire, num } = parseCloudRepertoireAndNum({
+      repertoireRaw: req.body.repertoire,
+      numRaw: req.body.num,
+    });
+    const sanitizedRepertoire = validatePathComponent(repertoire, "Nom de répertoire");
     const oldName = validateFileName(req.body.oldName, "Ancien nom");
     const newName = validateFileName(req.body.newName, "Nouveau nom");
 
-    if (!parent || !repertoire || !oldName || !newName) {
+    if (!parent || !sanitizedRepertoire || !oldName || !newName) {
       return res
         .status(400)
         .json({ success: false, message: "Données manquantes" });
@@ -715,9 +890,18 @@ router.post("/renameA", requireUploadScopedAdmin, async (req, res) => {
       return res.status(400).json({ success: false, message: "Extension non autorisée" });
     }
    
-    const oldPath = `${parent}/${repertoire}/${oldName}`;
+    const basePrefix =
+      parent === "cloud"
+        ? await buildCloudFolderPrefix({
+            user: req.user,
+            repertoire: sanitizedRepertoire,
+            num,
+          })
+        : `${parent}/${sanitizedRepertoire}/`;
+
+    const oldPath = `${basePrefix}${oldName}`;
     const racine = oldName.split('___')[0];
-    const newPath = `${parent}/${repertoire}/${racine}___${newName}`;
+    const newPath = `${basePrefix}${racine}___${newName}`;
     
     const oldFile = bucket.file(oldPath);
     const newFile = bucket.file(newPath);
