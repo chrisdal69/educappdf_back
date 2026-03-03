@@ -15,6 +15,11 @@ const userSchema = new mongoose.Schema({
   passwordChangeFailCount: { type: Number, default: 0 },
   passwordChangeFirstFailAt: { type: Date, default: null },
   passwordChangeLockedUntil: { type: Date, default: null },
+  pendingEmail: { type: String, default: "" },
+  emailChangeCode: { type: String, default: "", select: false },
+  emailChangeExpires: { type: Date, default: null, select: false },
+  emailChangeAttempts: { type: Number, default: 0, select: false },
+  emailChangeLockedUntil: { type: Date, default: null, select: false },
   date: { type: Date, default: Date.now },
   isVerified: { type: Boolean, default: false },
   confirm: { type: String, default: "", select: false }, // code hashé

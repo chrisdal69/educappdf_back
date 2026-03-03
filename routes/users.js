@@ -12,6 +12,9 @@ const Cloud = require("../models/cloud");
 const { getGcsEnvFolder } = require("../modules/gcsPaths");
 const yup = require("yup");
 const bcrypt = require("bcrypt");
+const jwt = require("jsonwebtoken");
+const crypto = require("crypto");
+const nodemailer = require("nodemailer");
 
 const NODE_ENV = process.env.NODE_ENV;
 let storage;
@@ -149,6 +152,34 @@ const buildCookieOptions = () => ({
   secure: process.env.NODE_ENV === "production",
   sameSite: process.env.NODE_ENV === "production" ? "none" : "lax",
 });
+
+const mailTransporter = nodemailer.createTransport({
+  service: "gmail",
+  auth: {
+    user: process.env.GMAIL_USER,
+    pass: process.env.GMAIL_SEND_PASS,
+  },
+});
+
+const normalizeEmail = (value) =>
+  typeof value === "string" ? value.toLowerCase().trim() : "";
+
+const EMAIL_CHANGE_CODE_TTL_MS = 7 * 60 * 1000;
+const EMAIL_CHANGE_CODE_TTL_MINUTES = 7;
+const EMAIL_CHANGE_CODE_LENGTH = 4;
+const EMAIL_CHANGE_CODE_CHARS =
+  "123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ";
+
+const generateEmailChangeCode = (length = EMAIL_CHANGE_CODE_LENGTH) => {
+  let result = "";
+  for (let i = 0; i < length; i += 1) {
+    result += EMAIL_CHANGE_CODE_CHARS[crypto.randomInt(0, EMAIL_CHANGE_CODE_CHARS.length)];
+  }
+  return result;
+};
+
+const EMAIL_CHANGE_MAX_ATTEMPTS = 5;
+const EMAIL_CHANGE_LOCK_MS = 15 * 60 * 1000;
 
 /* DEBUT info utilisateur */
 router.get("/me", authenticate, (req, res) => {
@@ -297,6 +328,337 @@ router.post("/change-password", authenticate, async (req, res) => {
   }
 });
 /* FIN Changepassword */
+
+/* DEBUT ChangeEmail */
+const changeEmailRequestSchema = yup.object().shape({
+  password: yup.string().required("Mot de passe obligatoire"),
+  newEmail: yup
+    .string()
+    .trim()
+    .email("Adresse email invalide")
+    .required("Nouvelle adresse email obligatoire"),
+});
+
+const changeEmailVerifySchema = yup.object().shape({
+  code: yup
+    .string()
+    .trim()
+    .length(EMAIL_CHANGE_CODE_LENGTH, "Code invalide")
+    .required("Code obligatoire"),
+});
+
+const buildJwtPayloadForUser = ({ tokenUser, email, userId }) => {
+  const payload = typeof tokenUser === "object" && tokenUser ? tokenUser : {};
+  return {
+    userId: userId || payload.userId,
+    email,
+    nom: payload.nom,
+    prenom: payload.prenom,
+    role: payload.role,
+    classId: payload.classId,
+    publicname: payload.publicname,
+    directoryname: payload.directoryname,
+    repertoires: payload.repertoires,
+    adminRepertoires: payload.adminRepertoires,
+  };
+};
+
+router.post("/change-email/request", authenticate, async (req, res) => {
+  let { password, newEmail } = req.body || {};
+  newEmail = normalizeEmail(newEmail);
+
+  try {
+    await changeEmailRequestSchema.validate(
+      { password, newEmail },
+      { abortEarly: false }
+    );
+
+    const user = await User.findById(req.user.userId).select("+password");
+    if (!user) {
+      return res.status(404).json({ error: "Utilisateur introuvable." });
+    }
+
+    const isPasswordValid = await bcrypt.compare(password, user.password || "");
+    if (!isPasswordValid) {
+      return res.status(401).json({ error: "Mot de passe incorrect." });
+    }
+
+    const currentEmail = normalizeEmail(user.email);
+    if (!newEmail || newEmail === currentEmail) {
+      return res.status(400).json({ error: "Nouvelle adresse email invalide." });
+    }
+
+    const existingEmail = await User.findOne({ email: newEmail }).select("_id");
+    if (existingEmail && existingEmail._id.toString() !== user._id.toString()) {
+      return res.status(409).json({ error: "Cet email est déjà utilisé." });
+    }
+
+    const code = generateEmailChangeCode();
+    const hashedCode = await bcrypt.hash(code, 10);
+    const expiresAt = new Date(Date.now() + EMAIL_CHANGE_CODE_TTL_MS);
+
+    user.pendingEmail = newEmail;
+    user.emailChangeCode = hashedCode;
+    user.emailChangeExpires = expiresAt;
+    user.emailChangeAttempts = 0;
+    user.emailChangeLockedUntil = null;
+    await user.save();
+
+    const mailToNewEmail = {
+      from: process.env.GMAIL_USER,
+      to: newEmail,
+      subject: "MathsApp - Changement d'email",
+      text: `Bonjour,\n\nVotre code de vérification est : ${code}\nFaire la différence entre majuscule et minuscule.\nCe code expire dans ${EMAIL_CHANGE_CODE_TTL_MINUTES} minutes.`,
+      html: `<div style="font-family: Arial, sans-serif; font-size:16px; line-height:1.6;">
+  <p>Bonjour,</p>
+  <p>Votre code de vérification est :</p>
+  <div style="font-size:28px; font-weight:bold; letter-spacing:3px;">${code}</div>
+  <p>Faire la différence entre majuscule et minuscule.</p>
+  <p>Ce code expire dans ${EMAIL_CHANGE_CODE_TTL_MINUTES} minutes.</p>
+</div>`,
+    };
+
+    await mailTransporter.sendMail(mailToNewEmail);
+
+    const mailToOldEmail = {
+      from: process.env.GMAIL_USER,
+      to: user.email,
+      subject: "MathsApp - Demande de changement d'email",
+      text: `Bonjour,\n\nUne demande de changement d'email a été effectuée pour votre compte vers : ${newEmail}\nSi vous n'êtes pas à l'origine de cette demande, merci de modifier votre mot de passe.`,
+      html: `<div style="font-family: Arial, sans-serif; font-size:16px; line-height:1.6;">
+  <p>Bonjour,</p>
+  <p>Une demande de changement d'email a été effectuée pour votre compte vers :</p>
+  <div style="font-size:18px; font-weight:bold;">${newEmail}</div>
+  <p>Si vous n'êtes pas à l'origine de cette demande, merci de modifier votre mot de passe.</p>
+</div>`,
+    };
+
+    Promise.resolve()
+      .then(() => mailTransporter.sendMail(mailToOldEmail))
+      .catch(() => null);
+
+    return res.json({
+      success: true,
+      pendingEmail: newEmail,
+      expiresAt,
+      message: "Un code a été envoyé sur votre nouvelle adresse email.",
+    });
+  } catch (err) {
+    if (err.name === "ValidationError") {
+      const validationErrors = err.inner.map((err) => ({
+        field: err.path,
+        message: err.message,
+      }));
+      return res.status(400).json({ errors: validationErrors });
+    }
+    console.error("Erreur change-email/request :", err);
+    return res.status(500).json({ error: "Erreur serveur." });
+  }
+});
+
+router.post("/change-email/resend", authenticate, async (req, res) => {
+  try {
+    const user = await User.findById(req.user.userId).select(
+      "+emailChangeCode +emailChangeExpires +emailChangeAttempts +emailChangeLockedUntil"
+    );
+    if (!user) {
+      return res.status(404).json({ error: "Utilisateur introuvable." });
+    }
+
+    const pendingEmail = normalizeEmail(user.pendingEmail);
+    if (!pendingEmail) {
+      return res.status(400).json({ error: "Aucun changement d'email en cours." });
+    }
+
+    const now = new Date();
+    if (user.emailChangeLockedUntil && user.emailChangeLockedUntil > now) {
+      const remainingMs = user.emailChangeLockedUntil.getTime() - now.getTime();
+      const remainingMinutes = Math.ceil(remainingMs / 60000);
+      res.set("Retry-After", String(Math.max(1, Math.ceil(remainingMs / 1000))));
+      return res.status(429).json({
+        error: `Trop de tentatives. Réessayez dans ${remainingMinutes} minute(s).`,
+      });
+    }
+
+    const code = generateEmailChangeCode();
+    const hashedCode = await bcrypt.hash(code, 10);
+    const expiresAt = new Date(Date.now() + EMAIL_CHANGE_CODE_TTL_MS);
+
+    user.emailChangeCode = hashedCode;
+    user.emailChangeExpires = expiresAt;
+    user.emailChangeAttempts = 0;
+    user.emailChangeLockedUntil = null;
+    await user.save();
+
+    const mailOptions = {
+      from: process.env.GMAIL_USER,
+      to: pendingEmail,
+      subject: "MathsApp - Changement d'email (nouveau code)",
+      text: `Bonjour,\n\nVotre nouveau code de vérification est : ${code}\nFaire la différence entre majuscule et minuscule.\nCe code expire dans ${EMAIL_CHANGE_CODE_TTL_MINUTES} minutes.`,
+      html: `<div style="font-family: Arial, sans-serif; font-size:16px; line-height:1.6;">
+  <p>Bonjour,</p>
+  <p>Votre nouveau code de vérification est :</p>
+  <div style="font-size:28px; font-weight:bold; letter-spacing:3px;">${code}</div>
+  <p>Faire la différence entre majuscule et minuscule.</p>
+  <p>Ce code expire dans ${EMAIL_CHANGE_CODE_TTL_MINUTES} minutes.</p>
+</div>`,
+    };
+
+    await mailTransporter.sendMail(mailOptions);
+
+    return res.json({
+      resend: true,
+      pendingEmail,
+      expiresAt,
+      message: "Un nouveau code a été envoyé par email.",
+    });
+  } catch (err) {
+    console.error("Erreur change-email/resend :", err);
+    return res.status(500).json({ error: "Erreur serveur." });
+  }
+});
+
+router.post("/change-email/verify", authenticate, async (req, res) => {
+  let { code } = req.body || {};
+  code = typeof code === "string" ? code.trim() : "";
+
+  try {
+    await changeEmailVerifySchema.validate({ code }, { abortEarly: false });
+
+    const user = await User.findById(req.user.userId).select(
+      "+emailChangeCode +emailChangeExpires +emailChangeAttempts +emailChangeLockedUntil"
+    );
+    if (!user) {
+      return res.status(404).json({ error: "Utilisateur introuvable." });
+    }
+
+    const pendingEmail = normalizeEmail(user.pendingEmail);
+    if (!pendingEmail || !user.emailChangeCode || !user.emailChangeExpires) {
+      return res.status(400).json({ error: "Aucun code de changement d'email en cours." });
+    }
+
+    const now = new Date();
+    if (user.emailChangeLockedUntil && user.emailChangeLockedUntil > now) {
+      const remainingMs = user.emailChangeLockedUntil.getTime() - now.getTime();
+      const remainingMinutes = Math.ceil(remainingMs / 60000);
+      res.set("Retry-After", String(Math.max(1, Math.ceil(remainingMs / 1000))));
+      return res.status(429).json({
+        error: `Trop de tentatives. Réessayez dans ${remainingMinutes} minute(s).`,
+        remainingAttempts: 0,
+      });
+    }
+
+    if (user.emailChangeExpires < now) {
+      user.pendingEmail = "";
+      user.emailChangeCode = "";
+      user.emailChangeExpires = null;
+      user.emailChangeAttempts = 0;
+      user.emailChangeLockedUntil = null;
+      await user.save();
+      return res.status(400).json({
+        error: "Code expiré. Merci de refaire la demande.",
+        expired: true,
+      });
+    }
+
+    const isMatch = await bcrypt.compare(code, user.emailChangeCode);
+    if (!isMatch) {
+      user.emailChangeAttempts = Number(user.emailChangeAttempts || 0) + 1;
+      const remainingAttempts = Math.max(0, EMAIL_CHANGE_MAX_ATTEMPTS - user.emailChangeAttempts);
+
+      if (user.emailChangeAttempts >= EMAIL_CHANGE_MAX_ATTEMPTS) {
+        user.emailChangeLockedUntil = new Date(now.getTime() + EMAIL_CHANGE_LOCK_MS);
+        await user.save();
+        const lockMinutes = Math.ceil(EMAIL_CHANGE_LOCK_MS / 60000);
+        res.set("Retry-After", String(Math.max(1, Math.ceil(EMAIL_CHANGE_LOCK_MS / 1000))));
+        return res.status(429).json({
+          error: `Trop de tentatives. Réessayez dans ${lockMinutes} minute(s).`,
+          remainingAttempts: 0,
+          lockedUntil: user.emailChangeLockedUntil,
+        });
+      }
+
+      await user.save();
+      return res.status(401).json({
+        error: "Code incorrect.",
+        remainingAttempts,
+        maxAttempts: EMAIL_CHANGE_MAX_ATTEMPTS,
+      });
+    }
+
+    const existingEmail = await User.findOne({ email: pendingEmail }).select("_id");
+    if (existingEmail && existingEmail._id.toString() !== user._id.toString()) {
+      user.pendingEmail = "";
+      user.emailChangeCode = "";
+      user.emailChangeExpires = null;
+      user.emailChangeAttempts = 0;
+      user.emailChangeLockedUntil = null;
+      await user.save();
+      return res.status(409).json({ error: "Cet email est déjà utilisé." });
+    }
+
+    const oldEmail = user.email;
+    user.email = pendingEmail;
+    user.pendingEmail = "";
+    user.emailChangeCode = "";
+    user.emailChangeExpires = null;
+    user.emailChangeAttempts = 0;
+    user.emailChangeLockedUntil = null;
+
+    try {
+      await user.save();
+    } catch (saveErr) {
+      if (saveErr && saveErr.code === 11000) {
+        return res.status(409).json({ error: "Cet email est déjà utilisé." });
+      }
+      throw saveErr;
+    }
+
+    const payload = buildJwtPayloadForUser({
+      tokenUser: req.user,
+      email: user.email,
+      userId: user._id.toString(),
+    });
+    const accessToken = jwt.sign(payload, process.env.ACCESS_TOKEN_SECRET, {
+      expiresIn: "1h",
+    });
+    res.cookie("jwt", accessToken, buildCookieOptions());
+
+    const mailOldEmail = {
+      from: process.env.GMAIL_USER,
+      to: oldEmail,
+      subject: "MathsApp - Email modifié",
+      text: `Bonjour,\n\nL'adresse email de votre compte a été modifiée vers : ${user.email}\nSi vous n'êtes pas à l'origine de ce changement, merci de modifier votre mot de passe.`,
+      html: `<div style="font-family: Arial, sans-serif; font-size:16px; line-height:1.6;">
+  <p>Bonjour,</p>
+  <p>L'adresse email de votre compte a été modifiée vers :</p>
+  <div style="font-size:18px; font-weight:bold;">${user.email}</div>
+  <p>Si vous n'êtes pas à l'origine de ce changement, merci de modifier votre mot de passe.</p>
+</div>`,
+    };
+
+    Promise.resolve()
+      .then(() => mailTransporter.sendMail(mailOldEmail))
+      .catch(() => null);
+
+    return res.json({
+      success: true,
+      email: user.email,
+      message: "Adresse email modifiée avec succès ✅",
+    });
+  } catch (err) {
+    if (err.name === "ValidationError") {
+      const validationErrors = err.inner.map((err) => ({
+        field: err.path,
+        message: err.message,
+      }));
+      return res.status(400).json({ errors: validationErrors });
+    }
+    console.error("Erreur change-email/verify :", err);
+    return res.status(500).json({ error: "Erreur serveur." });
+  }
+});
+/* FIN ChangeEmail */
 
 /* DEBUT leave class (unfollow) */
 const leaveClassSchema = yup.object().shape({
@@ -520,7 +882,7 @@ router.post("/delete-account", authenticate, async (req, res) => {
     if (isTeacher) {
       return res
         .status(403)
-        .json({ message: "Impossible pour un professeur de se désinscrire" });
+        .json({ message: "Suppression impossible pour cet utilisateur" });
     }
 
     const rawUser = await User.collection.findOne(
