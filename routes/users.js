@@ -315,6 +315,7 @@ router.post("/leave-class", authenticate, async (req, res) => {
     });
 
     // Nettoyage des données liées à cette classe (Quizz, Cloud, fichiers GCS cloud).
+    let cleanupStats = null;
     try {
       const cardIds = await Card.find({ classe: classObjectId })
         .select("_id")
@@ -330,21 +331,69 @@ router.post("/leave-class", authenticate, async (req, res) => {
 
       const userPrefix = await resolveUserFilePrefix(userObjectId);
 
-      await Promise.allSettled([
+      const settled = await Promise.allSettled([
         (async () => {
-          await Quizz.deleteMany({ id_user: userObjectId, id_classe: classObjectId });
+          const primary = await Quizz.deleteMany({
+            id_user: userObjectId,
+            id_classe: classObjectId,
+          });
+          const primaryDeleted = primary?.deletedCount ?? primary?.n ?? 0;
+
+          let legacyDeleted = 0;
           if (legacyClassFilter) {
-            await Quizz.deleteMany({ id_user: userObjectId, ...legacyClassFilter });
+            const legacy = await Quizz.deleteMany({
+              id_user: userObjectId,
+              ...legacyClassFilter,
+            });
+            legacyDeleted = legacy?.deletedCount ?? legacy?.n ?? 0;
           }
+
+          return { deleted: primaryDeleted + legacyDeleted };
         })(),
         (async () => {
-          await Cloud.deleteMany({ id_user: userObjectId, id_classe: classObjectId });
+          const primary = await Cloud.deleteMany({
+            id_user: userObjectId,
+            id_classe: classObjectId,
+          });
+          const primaryDeleted = primary?.deletedCount ?? primary?.n ?? 0;
+
+          let legacyDeleted = 0;
           if (legacyClassFilter) {
-            await Cloud.deleteMany({ id_user: userObjectId, ...legacyClassFilter });
+            const legacy = await Cloud.deleteMany({
+              id_user: userObjectId,
+              ...legacyClassFilter,
+            });
+            legacyDeleted = legacy?.deletedCount ?? legacy?.n ?? 0;
           }
+
+          return { deleted: primaryDeleted + legacyDeleted };
         })(),
         deleteUserCloudFilesFromGcs({ classeId: classObjectId, userPrefix }),
       ]);
+
+      const quizzResult = settled[0];
+      const cloudResult = settled[1];
+      const gcsResult = settled[2];
+
+      const quizzDeleted =
+        quizzResult?.status === "fulfilled"
+          ? Number(quizzResult.value?.deleted) || 0
+          : 0;
+      const cloudDeleted =
+        cloudResult?.status === "fulfilled"
+          ? Number(cloudResult.value?.deleted) || 0
+          : 0;
+      const gcsDeleted =
+        gcsResult?.status === "fulfilled"
+          ? Number(gcsResult.value?.deleted) || 0
+          : 0;
+
+      cleanupStats = {
+        quizzDeleted,
+        cloudDeleted,
+        gcsDeleted,
+        classesScanned: 1,
+      };
     } catch (cleanupError) {
       console.warn(
         "Nettoyage leave-class ignore :",
@@ -354,8 +403,10 @@ router.post("/leave-class", authenticate, async (req, res) => {
 
     res.clearCookie("jwt", buildCookieOptions());
     res.clearCookie("pending_login", buildCookieOptions());
-
-    return res.status(200).json({ message: "Désinscription réalisée" });
+    return res.status(200).json({
+      message: "Désinscription réalisée",
+      cleanup: cleanupStats || undefined,
+    });
   } catch (error) {
     if (error.name === "ValidationError") {
       const validationErrors = error.inner.map((err) => ({
@@ -441,19 +492,44 @@ router.post("/delete-account", authenticate, async (req, res) => {
     });
 
     // Nettoyage des données liées au compte (Quizz, Cloud, fichiers GCS cloud).
+    let cleanupStats = null;
     try {
       const userPrefix = await resolveUserFilePrefix(userObjectId);
       const uniqueClassIds = Array.from(
         new Set(classObjectIds.map((id) => String(id)))
       ).map((id) => new mongoose.Types.ObjectId(id));
 
-      await Promise.allSettled([
+      const settled = await Promise.allSettled([
         Quizz.deleteMany({ id_user: userObjectId }),
         Cloud.deleteMany({ id_user: userObjectId }),
         ...uniqueClassIds.map((classeId) =>
           deleteUserCloudFilesFromGcs({ classeId, userPrefix })
         ),
       ]);
+
+      const quizzResult = settled[0];
+      const cloudResult = settled[1];
+      const gcsResults = settled.slice(2);
+
+      const quizzDeleted =
+        quizzResult?.status === "fulfilled"
+          ? quizzResult.value?.deletedCount ?? quizzResult.value?.n ?? 0
+          : 0;
+      const cloudDeleted =
+        cloudResult?.status === "fulfilled"
+          ? cloudResult.value?.deletedCount ?? cloudResult.value?.n ?? 0
+          : 0;
+      const gcsDeleted = gcsResults.reduce((sum, entry) => {
+        if (entry?.status !== "fulfilled") return sum;
+        return sum + (Number(entry.value?.deleted) || 0);
+      }, 0);
+
+      cleanupStats = {
+        quizzDeleted,
+        cloudDeleted,
+        gcsDeleted,
+        classesScanned: uniqueClassIds.length,
+      };
     } catch (cleanupError) {
       console.warn(
         "Nettoyage delete-account ignore :",
@@ -471,7 +547,10 @@ router.post("/delete-account", authenticate, async (req, res) => {
 
     res.clearCookie("jwt", buildCookieOptions());
     res.clearCookie("pending_login", buildCookieOptions());
-    return res.status(200).json({ message: "Suppression de compte réalisée" });
+    return res.status(200).json({
+      message: "Suppression de compte réalisée",
+      cleanup: cleanupStats || undefined,
+    });
   } catch (error) {
     console.error("Erreur delete-account :", error);
     return res.status(500).json({ message: "Désinscription impossible" });
