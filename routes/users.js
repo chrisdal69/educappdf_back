@@ -2,10 +2,147 @@ const express = require("express");
 const router = express.Router();
 const { authenticate, authorize, requireAdmin } = require("../middlewares/auth");
 const mongoose = require("mongoose");
+const path = require("path");
+const { Storage } = require("@google-cloud/storage");
 const User = require("../models/users");
 const Classe = require("../models/classes");
+const Card = require("../models/cards");
+const Quizz = require("../models/quizzs");
+const Cloud = require("../models/cloud");
+const { getGcsEnvFolder } = require("../modules/gcsPaths");
 const yup = require("yup");
 const bcrypt = require("bcrypt");
+
+const NODE_ENV = process.env.NODE_ENV;
+let storage;
+if (NODE_ENV === "production") {
+  const serviceAccount = JSON.parse(process.env.GCP_KEY);
+  storage = new Storage({
+    projectId: serviceAccount.project_id,
+    credentials: serviceAccount,
+  });
+} else {
+  storage = new Storage({ keyFilename: "config/gcs-key.json" });
+}
+const bucketName = process.env.BUCKET_NAME || "educapp";
+const bucket = storage.bucket(bucketName);
+const gcsEnvFolder = getGcsEnvFolder(NODE_ENV);
+
+const sanitizeStorageSegment = (value) => {
+  if (!value || typeof value !== "string") return null;
+  const cleaned = value.trim();
+  if (!cleaned || cleaned.length > 80) return null;
+  if (cleaned.includes("/") || cleaned.includes("\\") || cleaned.includes("..")) return null;
+  return cleaned;
+};
+
+const removeSpaces = (str) => {
+  if (typeof str !== "string") return "";
+  const accentMap = {
+    é: "e", ë: "e", è: "e", ê: "e", É: "E", Ë: "E", È: "E", Ê: "E",
+    ô: "o", ö: "o", Ô: "O", Ö: "O",
+    ü: "u", ù: "u", û: "u", Ü: "U", Ù: "U", Û: "U",
+    ï: "i", î: "i", Ï: "I", Î: "I",
+    â: "a", à: "a", ä: "a", Â: "A", À: "A", Ä: "A",
+    ç: "c", Ç: "C",
+  };
+  const withoutSpaces = str.replace(/\s+/g, "");
+  return withoutSpaces.replace(
+    /[éëèêÉËÈÊôöÔÖüùûÜÙÛïîÏÎâàäÂÀÄçÇ]/g,
+    (c) => accentMap[c] || ""
+  );
+};
+
+const resolveUserFilePrefix = async (userObjectId) => {
+  if (!userObjectId) return "";
+  try {
+    const dbUser = await User.findById(userObjectId)
+      .select("prefix nom prenom")
+      .lean();
+    const prefix = typeof dbUser?.prefix === "string" ? dbUser.prefix.trim() : "";
+    if (prefix) return prefix;
+    const nom = typeof dbUser?.nom === "string" ? dbUser.nom : "";
+    const prenom = typeof dbUser?.prenom === "string" ? dbUser.prenom : "";
+    return `${removeSpaces(nom)}${removeSpaces(prenom)}`;
+  } catch (error) {
+    return "";
+  }
+};
+
+const deleteUserCloudFilesFromGcs = async ({ classeId, userPrefix }) => {
+  const trimmedPrefix = typeof userPrefix === "string" ? userPrefix.trim() : "";
+  if (!trimmedPrefix) return { deleted: 0 };
+
+  const classe = await Classe.findById(classeId)
+    .select("directoryname")
+    .lean();
+  const directoryname = sanitizeStorageSegment(classe?.directoryname || "");
+  if (!directoryname) return { deleted: 0 };
+
+  const filePrefix = `${trimmedPrefix}___`;
+  let deletedCount = 0;
+
+  const classBasePrefix = `${`${gcsEnvFolder}`.replace(/^\/+|\/+$/g, "")}/${directoryname}/`;
+
+  const listPrefixes = async ({ prefix, delimiter }) => {
+    const prefixes = new Set();
+    let pageToken = undefined;
+    do {
+      const [, nextQuery, apiResponse] = await bucket.getFiles({
+        prefix,
+        delimiter,
+        autoPaginate: false,
+        maxResults: 1000,
+        pageToken,
+      });
+      const nextPrefixes = Array.isArray(apiResponse?.prefixes) ? apiResponse.prefixes : [];
+      nextPrefixes.forEach((p) => prefixes.add(p));
+      pageToken = nextQuery?.pageToken;
+    } while (pageToken);
+    return Array.from(prefixes);
+  };
+
+  const repertoirePrefixes = await listPrefixes({ prefix: classBasePrefix, delimiter: "/" });
+
+  for (const repPrefix of repertoirePrefixes) {
+    const cloudRootPrefix = `${repPrefix}cloud/`;
+    const tagPrefixes = await listPrefixes({ prefix: cloudRootPrefix, delimiter: "/" });
+    const filteredTagPrefixes = tagPrefixes.filter((p) => /\/tag\d+\/$/.test(p));
+
+    for (const tagPrefix of filteredTagPrefixes) {
+      let pageToken = undefined;
+      do {
+        const [files, nextQuery] = await bucket.getFiles({
+          prefix: tagPrefix,
+          delimiter: "/",
+          autoPaginate: false,
+          maxResults: 1000,
+          pageToken,
+        });
+
+        const deletions = files
+          .filter((file) => file?.name && !file.name.endsWith("/"))
+          .filter((file) => path.posix.basename(file.name).startsWith(filePrefix))
+          .map((file) =>
+            file
+              .delete({ ignoreNotFound: true })
+              .then(() => {
+                deletedCount += 1;
+              })
+              .catch(() => null)
+          );
+
+        if (deletions.length) {
+          await Promise.allSettled(deletions);
+        }
+
+        pageToken = nextQuery?.pageToken;
+      } while (pageToken);
+    }
+  }
+
+  return { deleted: deletedCount };
+};
 
 const buildCookieOptions = () => ({
   httpOnly: true,
@@ -176,6 +313,44 @@ router.post("/leave-class", authenticate, async (req, res) => {
     ).catch((err) => {
       console.error("Erreur suppression exceptionvisible :", err);
     });
+
+    // Nettoyage des données liées à cette classe (Quizz, Cloud, fichiers GCS cloud).
+    try {
+      const cardIds = await Card.find({ classe: classObjectId })
+        .select("_id")
+        .lean()
+        .then((rows) => rows.map((r) => r._id).filter(Boolean));
+
+      const legacyClassFilter = cardIds.length
+        ? {
+            id_card: { $in: cardIds },
+            $or: [{ id_classe: { $exists: false } }, { id_classe: null }],
+          }
+        : null;
+
+      const userPrefix = await resolveUserFilePrefix(userObjectId);
+
+      await Promise.allSettled([
+        (async () => {
+          await Quizz.deleteMany({ id_user: userObjectId, id_classe: classObjectId });
+          if (legacyClassFilter) {
+            await Quizz.deleteMany({ id_user: userObjectId, ...legacyClassFilter });
+          }
+        })(),
+        (async () => {
+          await Cloud.deleteMany({ id_user: userObjectId, id_classe: classObjectId });
+          if (legacyClassFilter) {
+            await Cloud.deleteMany({ id_user: userObjectId, ...legacyClassFilter });
+          }
+        })(),
+        deleteUserCloudFilesFromGcs({ classeId: classObjectId, userPrefix }),
+      ]);
+    } catch (cleanupError) {
+      console.warn(
+        "Nettoyage leave-class ignore :",
+        cleanupError?.message || cleanupError
+      );
+    }
 
     res.clearCookie("jwt", buildCookieOptions());
     res.clearCookie("pending_login", buildCookieOptions());
