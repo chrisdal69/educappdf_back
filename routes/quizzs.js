@@ -73,6 +73,8 @@ const allowedImageExtensions = new Set([".jpg", ".jpeg", ".png"]);
 
 const quizzSaveSchema = yup.object().shape({
   cardId: yup.string().trim().required("cardId requis"),
+  classId: yup.string().trim(),
+  id_classe: yup.string().trim(),
   reponses: yup
     .array()
     .of(yup.number().integer().min(0))
@@ -271,17 +273,51 @@ router.get("/historique", authenticate, async (req, res) => {
       return res.status(400).json({ message: "cardId requis." });
     }
 
+    const authClassId = req.user?.classId ? String(req.user.classId) : "";
+    const queryClassId =
+      (req.query && (req.query.classId || req.query.id_classe)) || "";
+    const trimmedQueryClassId =
+      typeof queryClassId === "string" ? queryClassId.trim() : "";
+
+    if (trimmedQueryClassId && authClassId && trimmedQueryClassId !== authClassId) {
+      return res.status(403).json({ message: "Classe invalide." });
+    }
+
+    const classeId = authClassId || trimmedQueryClassId;
+    if (!classeId || !mongoose.Types.ObjectId.isValid(classeId)) {
+      return res.status(400).json({ message: "Identifiant de classe manquant." });
+    }
+
     const card = await Card.findById(cardId)
-      .select("evalQuizz resultatQuizz")
+      .select("evalQuizz resultatQuizz classe")
       .lean();
     if (!card || card.evalQuizz !== "oui") {
       return res.status(404).json({ message: "Quizz non disponible." });
     }
 
-    const existing = await Quizz.findOne({
+    const cardClasseId = card?.classe ? String(card.classe) : "";
+    if (cardClasseId && String(cardClasseId) !== String(classeId)) {
+      return res.status(403).json({ message: "Quizz non disponible." });
+    }
+
+    let existing = await Quizz.findOne({
       id_user: req.user.userId,
       id_card: cardId,
+      id_classe: classeId,
     }).lean();
+
+    if (!existing) {
+      const legacy = await Quizz.findOne({
+        id_user: req.user.userId,
+        id_card: cardId,
+        $or: [{ id_classe: { $exists: false } }, { id_classe: null }],
+      });
+      if (legacy) {
+        legacy.id_classe = classeId;
+        await legacy.save();
+        existing = legacy.toObject();
+      }
+    }
 
     if (!existing) {
       return res.status(200).json({ alreadyDone: false });
@@ -318,13 +354,19 @@ router.get("/:id/results", requireQuizzScopedAdmin, async (req, res) => {
   try {
     const { id } = req.params;
 
-    const card = await Card.findById(id).select("quizz").lean();
+    const card = await Card.findById(id).select("quizz classe").lean();
     if (!card) {
       return res.status(404).json({ error: "Carte introuvable." });
     }
 
     const questionCount = Array.isArray(card.quizz) ? card.quizz.length : 0;
-    const submissions = await Quizz.find({ id_card: id }).select("reponses").lean();
+    const classeId = card?.classe ? String(card.classe) : "";
+    const classFilter = classeId
+      ? { $or: [{ id_classe: classeId }, { id_classe: { $exists: false } }, { id_classe: null }] }
+      : { $or: [{ id_classe: { $exists: false } }, { id_classe: null }] };
+    const submissions = await Quizz.find({ id_card: id, ...classFilter })
+      .select("reponses")
+      .lean();
 
     const totalSubmissions = submissions.length;
     const correctCounts = Array.from({ length: questionCount }, () => 0);
@@ -351,13 +393,17 @@ router.get("/:id/results", requireQuizzScopedAdmin, async (req, res) => {
 router.get("/:id/results/export", requireQuizzScopedAdmin, async (req, res) => {
   try {
     const { id } = req.params;
-    const card = await Card.findById(id).select("quizz titre num repertoire").lean();
+    const card = await Card.findById(id).select("quizz titre num repertoire classe").lean();
     if (!card) {
       return res.status(404).json({ error: "Carte introuvable." });
     }
 
     const totalQuestions = Array.isArray(card.quizz) ? card.quizz.length : 0;
-    const submissions = await Quizz.find({ id_card: id })
+    const classeId = card?.classe ? String(card.classe) : "";
+    const classFilter = classeId
+      ? { $or: [{ id_classe: classeId }, { id_classe: { $exists: false } }, { id_classe: null }] }
+      : { $or: [{ id_classe: { $exists: false } }, { id_classe: null }] };
+    const submissions = await Quizz.find({ id_card: id, ...classFilter })
       .populate({ path: "id_user", select: "prenom nom" })
       .select("reponses id_user")
       .lean();
@@ -503,21 +549,53 @@ router.get("/:id/export/zip", requireQuizzScopedAdmin, async (req, res) => {
 
 router.post("/", authenticate, async (req, res) => {
   try {
-    const { cardId, reponses } = await quizzSaveSchema.validate(req.body, {
+    const { cardId, reponses, classId, id_classe } = await quizzSaveSchema.validate(req.body, {
       abortEarly: false,
       stripUnknown: true,
     });
 
-    const existing = await Quizz.findOne({
+    const authClassId = req.user?.classId ? String(req.user.classId) : "";
+    const bodyClassId = typeof classId === "string" ? classId.trim() : "";
+    const bodyClasseId = typeof id_classe === "string" ? id_classe.trim() : "";
+    const requestedClasseId = bodyClasseId || bodyClassId;
+
+    if (requestedClasseId && authClassId && requestedClasseId !== authClassId) {
+      return res.status(403).json({ message: "Classe invalide." });
+    }
+
+    const classeId = authClassId || requestedClasseId;
+    if (!classeId || !mongoose.Types.ObjectId.isValid(classeId)) {
+      return res.status(400).json({ message: "Identifiant de classe manquant." });
+    }
+
+    let existing = await Quizz.findOne({
       id_user: req.user.userId,
       id_card: cardId,
+      id_classe: classeId,
     });
 
+    if (!existing) {
+      const legacy = await Quizz.findOne({
+        id_user: req.user.userId,
+        id_card: cardId,
+        $or: [{ id_classe: { $exists: false } }, { id_classe: null }],
+      });
+      if (legacy) {
+        legacy.id_classe = classeId;
+        existing = await legacy.save();
+      }
+    }
+
     const card = await Card.findById(cardId)
-      .select("evalQuizz quizz resultatQuizz")
+      .select("evalQuizz quizz resultatQuizz classe")
       .lean();
     if (!card) {
       return res.status(404).json({ message: "Carte inconnue." });
+    }
+
+    const cardClasseId = card?.classe ? String(card.classe) : "";
+    if (cardClasseId && String(cardClasseId) !== String(classeId)) {
+      return res.status(403).json({ message: "Carte non accessible." });
     }
     if (card.evalQuizz === "attente") {
       return res.status(403).json({ message: "Quizz non accessible." });
@@ -571,6 +649,7 @@ router.post("/", authenticate, async (req, res) => {
 
     const doc = new Quizz({
       id_user: req.user.userId,
+      id_classe: classeId,
       id_card: cardId,
       reponses: scoredReponses,
     });
