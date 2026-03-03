@@ -476,8 +476,9 @@ router.post(
     getCardRepertoireById(req.body?.id_card, req.user?.classId)
   ),
   async (req, res) => {
-  const { id_card, nom, prenom, message, filename } = req.body || {};
+  const { id_card, prefix, nom, prenom, message, filename } = req.body || {};
   const trimmedCard = typeof id_card === "string" ? id_card.trim() : "";
+  const trimmedPrefix = typeof prefix === "string" ? prefix.trim() : "";
   const trimmedNom = typeof nom === "string" ? nom.trim().toUpperCase() : "";
   const trimmedPrenom =
     typeof prenom === "string" ? prenom.trim().toLowerCase() : "";
@@ -491,8 +492,8 @@ router.post(
   if (!mongoose.Types.ObjectId.isValid(trimmedCard)) {
     return res.status(400).json({ error: "Id de carte invalide." });
   }
-  if (!trimmedNom || !trimmedPrenom) {
-    return res.status(400).json({ error: "Nom ou prenom manquant." });
+  if (!trimmedPrefix && (!trimmedNom || !trimmedPrenom)) {
+    return res.status(400).json({ error: "Prefix, ou nom/prenom manquant." });
   }
   if (!trimmedMessage) {
     return res.status(400).json({ error: "Message manquant." });
@@ -502,12 +503,14 @@ router.post(
   }
 
   try {
-    const user = await User.findOne({
-      nom: trimmedNom,
-      prenom: trimmedPrenom,
-    }).lean();
+    const user = trimmedPrefix
+      ? await User.findOne({ prefix: trimmedPrefix }).lean()
+      : await User.findOne({
+          nom: trimmedNom,
+          prenom: trimmedPrenom,
+        }).lean();
     if (!user) {
-      console.log(trimmedNom , trimmedPrenom )
+      console.log(trimmedPrefix || trimmedNom, trimmedPrefix ? "" : trimmedPrenom);
       return res.status(404).json({ error: "Utilisateur introuvable." });
     }
 
