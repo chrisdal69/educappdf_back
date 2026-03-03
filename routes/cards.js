@@ -319,6 +319,7 @@ router.post(
   requireScopedAdmin((req) => req.body?.repertoire),
   async (req, res) => {
   const repertoire = (req.body?.repertoire || "").trim();
+  
   const classId =
     typeof req.user?.classId === "string" ? req.user.classId.trim() : "";
 
