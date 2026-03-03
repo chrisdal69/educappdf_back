@@ -410,6 +410,11 @@ router.get("/cloud", authenticate, async (req, res) => {
   const trimmedCard =
     typeof req.query.id_card === "string" ? req.query.id_card.trim() : "";
   const userId = req.user?.userId;
+  const authClassId = req.user?.classId ? String(req.user.classId) : "";
+  const queryClassId =
+    (req.query && (req.query.classId || req.query.id_classe)) || "";
+  const trimmedQueryClassId =
+    typeof queryClassId === "string" ? queryClassId.trim() : "";
 
   if (!trimmedCard) {
     return res.status(400).json({ error: "Id de carte manquant." });
@@ -420,14 +425,57 @@ router.get("/cloud", authenticate, async (req, res) => {
   if (!userId) {
     return res.status(401).json({ error: "Utilisateur non authentifie." });
   }
+  if (trimmedQueryClassId && authClassId && trimmedQueryClassId !== authClassId) {
+    return res.status(403).json({ error: "Classe invalide." });
+  }
+
+  const classeId = authClassId || trimmedQueryClassId;
+  if (!classeId || !mongoose.Types.ObjectId.isValid(classeId)) {
+    return res.status(400).json({ error: "Identifiant de classe manquant." });
+  }
 
   try {
+    const card = await Card.findById(trimmedCard).select("classe").lean();
+    if (!card) {
+      return res.status(404).json({ error: "Carte introuvable." });
+    }
+    const cardClasseId = card?.classe ? String(card.classe) : "";
+    if (cardClasseId && String(cardClasseId) !== String(classeId)) {
+      return res.status(403).json({ error: "Carte non accessible." });
+    }
+
+    const classFilter = {
+      $or: [
+        { id_classe: classeId },
+        { id_classe: { $exists: false } },
+        { id_classe: null },
+      ],
+    };
+
     const result = await Cloud.find({
       id_card: trimmedCard,
       id_user: userId,
+      ...classFilter,
     })
       .sort({ date: -1 })
       .lean();
+
+    const hasLegacy = Array.isArray(result)
+      ? result.some((entry) => !entry?.id_classe)
+      : false;
+
+    if (hasLegacy) {
+      Cloud.updateMany(
+        {
+          id_card: trimmedCard,
+          id_user: userId,
+          $or: [{ id_classe: { $exists: false } }, { id_classe: null }],
+        },
+        { $set: { id_classe: classeId } }
+      ).catch((err) =>
+        console.warn("Migration id_classe cloud ignoree", err?.message || err)
+      );
+    }
 
     return res.json({ result });
   } catch (err) {
@@ -441,6 +489,7 @@ router.get("/cloud", authenticate, async (req, res) => {
 router.delete("/cloud/:id", authenticate, async (req, res) => {
   const { id } = req.params;
   const userId = req.user?.userId;
+  const authClassId = req.user?.classId ? String(req.user.classId) : "";
 
   if (!id) {
     return res.status(400).json({ error: "Id de message manquant." });
@@ -451,11 +500,22 @@ router.delete("/cloud/:id", authenticate, async (req, res) => {
   if (!userId) {
     return res.status(401).json({ error: "Utilisateur non authentifie." });
   }
+  if (!authClassId || !mongoose.Types.ObjectId.isValid(authClassId)) {
+    return res.status(400).json({ error: "Identifiant de classe manquant." });
+  }
 
   try {
+    const classFilter = {
+      $or: [
+        { id_classe: authClassId },
+        { id_classe: { $exists: false } },
+        { id_classe: null },
+      ],
+    };
     const deleted = await Cloud.findOneAndDelete({
       _id: id,
       id_user: userId,
+      ...classFilter,
     }).lean();
 
     if (!deleted) {
@@ -477,7 +537,8 @@ router.post(
     getCardRepertoireById(req.body?.id_card, req.user?.classId)
   ),
   async (req, res) => {
-  const { id_card, prefix, nom, prenom, message, filename } = req.body || {};
+  const { id_card, prefix, nom, prenom, message, filename, classId, id_classe } =
+    req.body || {};
   const trimmedCard = typeof id_card === "string" ? id_card.trim() : "";
   const trimmedPrefix = typeof prefix === "string" ? prefix.trim() : "";
   const trimmedNom = typeof nom === "string" ? nom.trim().toUpperCase() : "";
@@ -486,6 +547,20 @@ router.post(
   const trimmedMessage = typeof message === "string" ? message.trim() : "";
   const trimmedFilename =
     typeof filename === "string" ? filename.trim() : "";
+
+  const authClassId = req.user?.classId ? String(req.user.classId) : "";
+  const bodyClassId = typeof classId === "string" ? classId.trim() : "";
+  const bodyClasseId = typeof id_classe === "string" ? id_classe.trim() : "";
+  const requestedClasseId = bodyClasseId || bodyClassId;
+
+  if (requestedClasseId && authClassId && requestedClasseId !== authClassId) {
+    return res.status(403).json({ error: "Classe invalide." });
+  }
+
+  const classeId = authClassId || requestedClasseId;
+  if (!classeId || !mongoose.Types.ObjectId.isValid(classeId)) {
+    return res.status(400).json({ error: "Identifiant de classe manquant." });
+  }
 
   if (!trimmedCard) {
     return res.status(400).json({ error: "Id de carte manquant." });
@@ -504,24 +579,31 @@ router.post(
   }
 
   try {
+    const followFilter = { follow: { $elemMatch: { classe: classeId } } };
     const user = trimmedPrefix
-      ? await User.findOne({ prefix: trimmedPrefix }).lean()
+      ? await User.findOne({ prefix: trimmedPrefix, ...followFilter }).lean()
       : await User.findOne({
           nom: trimmedNom,
           prenom: trimmedPrenom,
+          ...followFilter,
         }).lean();
     if (!user) {
       console.log(trimmedPrefix || trimmedNom, trimmedPrefix ? "" : trimmedPrenom);
       return res.status(404).json({ error: "Utilisateur introuvable." });
     }
 
-    const card = await Card.findById(trimmedCard).lean();
+    const card = await Card.findById(trimmedCard).select("classe").lean();
     if (!card) {
       return res.status(404).json({ error: "Carte introuvable." });
+    }
+    const cardClasseId = card?.classe ? String(card.classe) : "";
+    if (cardClasseId && String(cardClasseId) !== String(classeId)) {
+      return res.status(403).json({ error: "Carte non accessible." });
     }
 
     const created = await Cloud.create({
       id_user: user._id,
+      id_classe: card.classe || classeId,
       id_card: card._id,
       filename: trimmedFilename,
       message: trimmedMessage,
