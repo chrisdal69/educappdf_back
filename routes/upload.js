@@ -12,6 +12,7 @@ const {
   requireScopedAdmin,
 } = require("../middlewares/auth");
 const Classe = require("../models/classes");
+const User = require("../models/users");
 const { getGcsEnvFolder, buildCardPrefix } = require("../modules/gcsPaths");
 
 const requireUploadScopedAdmin = requireScopedAdmin((req) => {
@@ -65,6 +66,23 @@ const stripPrefix = (name = "") => {
   const parts = `${name}`.split("___");
   return parts.length > 1 ? parts.slice(1).join("___") : name;
 };
+
+async function resolveUserFilePrefix(user) {
+  const userId = user?.userId ? String(user.userId).trim() : "";
+  if (userId && mongoose.Types.ObjectId.isValid(userId)) {
+    try {
+      const dbUser = await User.findById(userId).select("prefix").lean();
+      const prefix = typeof dbUser?.prefix === "string" ? dbUser.prefix.trim() : "";
+      if (prefix) return prefix;
+    } catch (error) {
+      // fallback below
+    }
+  }
+
+  const nom = typeof user?.nom === "string" ? user.nom : "";
+  const prenom = typeof user?.prenom === "string" ? user.prenom : "";
+  return `${removeSpaces(nom)}${removeSpaces(prenom)}`;
+}
 
 // Téléchargement proxy (retire le préfixe nom+prenom+___ du nom proposé)
 router.get("/download", authenticate, async (req, res) => {
@@ -218,8 +236,7 @@ async function createPublicFolder(dossierParent, folderName) {
 router.post("/recup", authenticate, async (req, res) => {
   try {
     // Validation des champs name , parent et repertoire
-    const { nom, prenom, email, role } = req.user;
-    const safeName = `${removeSpaces(nom)}${removeSpaces(prenom)}`;
+    const safeName = await resolveUserFilePrefix(req.user);
     const parent = validatePathComponent(req.body.parent, "Dossier parent");
     const { repertoire, num } = parseCloudRepertoireAndNum({
       repertoireRaw: req.body.repertoire,
@@ -598,8 +615,7 @@ router.post("/", authenticate, async (req, res) => {
       await createPublicFolder(parent, sanitizedRepertoire);
     }
     // Préfixe du user devant le fichier
-    const { nom, prenom, email, role } = req.user;
-    const safeName = `${removeSpaces(nom)}${removeSpaces(prenom)}`;
+    const safeName = await resolveUserFilePrefix(req.user);
     // Vérifie la présence de fichiers
     if (!req.files || Object.keys(req.files).length === 0) {
       return res.status(400).send("Aucun fichier reçu");
@@ -684,8 +700,7 @@ router.post("/", authenticate, async (req, res) => {
 /* DEBUT supprimer un fichier pour l'admin */
 router.post("/delete", authenticate, async (req, res) => {
   try {
-    const { nom, prenom } = req.user;
-    const safeName = `${removeSpaces(nom)}${removeSpaces(prenom)}`;
+    const safeName = await resolveUserFilePrefix(req.user);
 
     const parent = validatePathComponent(req.body.parent, "Dossier parent");
     const { repertoire, num } = parseCloudRepertoireAndNum({
@@ -736,9 +751,6 @@ router.post("/delete", authenticate, async (req, res) => {
 /* DEBUT supprimer un fichier */
 router.post("/deleteA", requireUploadScopedAdmin, async (req, res) => {
   try {
-    const { nom, prenom } = req.user;
-    const safeName = `${removeSpaces(nom)}${removeSpaces(prenom)}`;
-
     const parent = validatePathComponent(req.body.parent, "Dossier parent");
     const { repertoire, num } = parseCloudRepertoireAndNum({
       repertoireRaw: req.body.repertoire,
@@ -788,8 +800,7 @@ router.post("/deleteA", requireUploadScopedAdmin, async (req, res) => {
 /* DEBUT renommer un fichier */
 router.post("/rename", authenticate, async (req, res) => {
   try {
-    const { nom, prenom } = req.user;
-    const safeName = `${removeSpaces(nom)}${removeSpaces(prenom)}`;
+    const safeName = await resolveUserFilePrefix(req.user);
 
     const parent = validatePathComponent(req.body.parent, "Dossier parent");
     const { repertoire, num } = parseCloudRepertoireAndNum({
@@ -863,9 +874,6 @@ router.post("/rename", authenticate, async (req, res) => {
 /* DEBUT renommer un fichier en admin*/
 router.post("/renameA", requireUploadScopedAdmin, async (req, res) => {
   try {
-    const { nom, prenom } = req.user;
-    const safeName = `${removeSpaces(nom)}${removeSpaces(prenom)}`;
-
     const parent = validatePathComponent(req.body.parent, "Dossier parent");
     const { repertoire, num } = parseCloudRepertoireAndNum({
       repertoireRaw: req.body.repertoire,
