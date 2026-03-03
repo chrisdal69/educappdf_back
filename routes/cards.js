@@ -654,7 +654,7 @@ router.delete("/:id", requireCardScopedAdmin, async (req, res) => {
       Quizz.deleteMany({ id_card: card._id }),
       Cloud.deleteMany({ id_card: card._id }),
       (async () => {
-        if (sanitizedRepertoire && tagNumber !== null) {
+        if (sanitizedRepertoire && sanitizedClasse && tagNumber !== null) {
           const truncatedTagNumber = Math.trunc(tagNumber);
           const tagSuffix = `tag${truncatedTagNumber}`;
           const prefix = buildCardTagPrefix({
@@ -662,7 +662,12 @@ router.delete("/:id", requireCardScopedAdmin, async (req, res) => {
             tagNumber: truncatedTagNumber,
             classeSegment: sanitizedClasse,
           });
-          const cloudPrefix = `cloud/${sanitizedRepertoire}${tagSuffix}/`;
+          const cloudPrefix = `${buildCardPrefix({
+            gcsEnvFolder,
+            classe: sanitizedClasse,
+            repertoire: sanitizedRepertoire,
+          })}cloud/${tagSuffix}/`;
+          const legacyCloudPrefix = `cloud/${sanitizedRepertoire}${tagSuffix}/`;
           try {
             await bucket.deleteFiles({ prefix });
           } catch (err) {
@@ -672,6 +677,14 @@ router.delete("/:id", requireCardScopedAdmin, async (req, res) => {
             await bucket.deleteFiles({ prefix: cloudPrefix });
           } catch (err) {
             console.warn("Suppression des fichiers cloud du bucket echouee", err);
+          }
+          try {
+            await bucket.deleteFiles({ prefix: legacyCloudPrefix });
+          } catch (err) {
+            console.warn(
+              "Suppression des fichiers cloud legacy du bucket echouee",
+              err
+            );
           }
         }
       })(),

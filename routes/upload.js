@@ -536,9 +536,8 @@ const buildCloudFolderPrefix = async ({ user, repertoire, num }) => {
     gcsEnvFolder,
     classe: directoryname,
     repertoire: sanitizedRepertoire,
-    tagNumber,
   });
-  return `${basePrefix}cloud/`;
+  return `${basePrefix}cloud/tag${tagNumber}/`;
 };
 
 function removeSpaces(str) {
@@ -607,8 +606,13 @@ router.post("/", authenticate, async (req, res) => {
         repertoire: sanitizedRepertoire,
         num,
       });
-      const cloudParent = cloudFolderPrefix.replace(/\/cloud\/$/, "");
-      await createPublicFolder(cloudParent, "cloud");
+      const tagNumber = parseTagNumber(num);
+      if (tagNumber === null) {
+        return res.status(400).send("Numero de tag invalide.");
+      }
+      const tagFolder = `tag${tagNumber}`;
+      const cloudParent = cloudFolderPrefix.replace(new RegExp(`/${tagFolder}/$`), "");
+      await createPublicFolder(cloudParent, tagFolder);
       repertoireBucket = cloudFolderPrefix.replace(/\/$/, "");
     } else {
       // Création du répertoire public si besoin
