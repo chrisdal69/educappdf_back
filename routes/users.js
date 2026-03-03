@@ -162,6 +162,7 @@ router.get("/me", authenticate, (req, res) => {
 
 /* DEBUT Changepassword */
 const schema = yup.object().shape({
+  oldPassword: yup.string().required("Ancien mot de passe obligatoire"),
   newPassword: yup
     .string()
     .min(8, "8 caractères minimum")
@@ -171,33 +172,111 @@ const schema = yup.object().shape({
     .matches(/[^A-Za-z0-9]/, "Un caractère spécial est requis")
     .required("Mot de passe obligatoire"),
 });
+
+const CHANGE_PASSWORD_MAX_ATTEMPTS = 5;
+const CHANGE_PASSWORD_WINDOW_MS = 15 * 60 * 1000;
+const CHANGE_PASSWORD_LOCK_MS = 15 * 60 * 1000;
+
 router.post("/change-password", authenticate, async (req, res) => {
-  const { newPassword } = req.body;
-  console.log("etape 1 : ", newPassword);
+  const { oldPassword, newPassword } = req.body || {};
   try {
+    if (!oldPassword) {
+      return res.status(400).json({ error: "Ancien mot de passe requis." });
+    }
     // Vérifie la présence du nouveau mot de passe
     if (!newPassword || newPassword.length < 8) {
       return res.status(400).json({ error: "Mot de passe invalide." });
     }
     // Validation des données avec Yup
     await schema.validate(
-      { newPassword },
+      { oldPassword, newPassword },
       { abortEarly: false } // pour obtenir toutes les erreurs à la fois
     );
-    console.log("etape 2 : ", newPassword);
 
     // Récupère l’utilisateur connecté via req.user.userId
-    const user = await User.findById(req.user.userId);
+    const user = await User.findById(req.user.userId).select("+password");
     if (!user) {
       return res.status(404).json({ error: "Utilisateur introuvable." });
     }
-    console.log("etape 3 : ", user);
+
+    if (!user.password) {
+      return res
+        .status(400)
+        .json({ error: "Impossible de vérifier l'ancien mot de passe." });
+    }
+
+    const now = new Date();
+    if (user.passwordChangeLockedUntil && user.passwordChangeLockedUntil > now) {
+      const remainingMs = user.passwordChangeLockedUntil.getTime() - now.getTime();
+      const remainingMinutes = Math.ceil(remainingMs / 60000);
+      res.set("Retry-After", String(Math.max(1, Math.ceil(remainingMs / 1000))));
+      return res.status(429).json({
+        error: `Trop de tentatives. Réessayez dans ${remainingMinutes} minute(s).`,
+        remainingAttempts: 0,
+        lockedUntil: user.passwordChangeLockedUntil,
+      });
+    }
+
+    if (
+      user.passwordChangeFirstFailAt &&
+      now.getTime() - user.passwordChangeFirstFailAt.getTime() >
+        CHANGE_PASSWORD_WINDOW_MS
+    ) {
+      user.passwordChangeFailCount = 0;
+      user.passwordChangeFirstFailAt = null;
+      user.passwordChangeLockedUntil = null;
+    }
+
+    const isOldPasswordValid = await bcrypt.compare(oldPassword, user.password);
+    if (!isOldPasswordValid) {
+      if (
+        !user.passwordChangeFirstFailAt ||
+        now.getTime() - user.passwordChangeFirstFailAt.getTime() >
+          CHANGE_PASSWORD_WINDOW_MS
+      ) {
+        user.passwordChangeFirstFailAt = now;
+        user.passwordChangeFailCount = 1;
+      } else {
+        user.passwordChangeFailCount = Number(user.passwordChangeFailCount || 0) + 1;
+      }
+
+      if (user.passwordChangeFailCount >= CHANGE_PASSWORD_MAX_ATTEMPTS) {
+        user.passwordChangeLockedUntil = new Date(
+          now.getTime() + CHANGE_PASSWORD_LOCK_MS
+        );
+        await user.save();
+        const lockMinutes = Math.ceil(CHANGE_PASSWORD_LOCK_MS / 60000);
+        res.set(
+          "Retry-After",
+          String(Math.max(1, Math.ceil(CHANGE_PASSWORD_LOCK_MS / 1000)))
+        );
+        return res.status(429).json({
+          error: `Trop de tentatives. Réessayez dans ${lockMinutes} minute(s).`,
+          remainingAttempts: 0,
+          lockedUntil: user.passwordChangeLockedUntil,
+        });
+      }
+
+      await user.save();
+      const remainingAttempts = Math.max(
+        0,
+        CHANGE_PASSWORD_MAX_ATTEMPTS - Number(user.passwordChangeFailCount || 0)
+      );
+      return res.status(401).json({
+        error: "Ancien mot de passe incorrect.",
+        remainingAttempts,
+        maxAttempts: CHANGE_PASSWORD_MAX_ATTEMPTS,
+      });
+    }
 
     // Hash le nouveau mot de passe
     const hashed = await bcrypt.hash(newPassword, 10);
 
     //  Met à jour l’utilisateur
     user.password = hashed;
+    user.passwordChangeFailCount = 0;
+    user.passwordChangeFirstFailAt = null;
+    user.passwordChangeLockedUntil = null;
     await user.save();
 
     // Réponse au client

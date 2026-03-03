@@ -12,6 +12,9 @@ const userSchema = new mongoose.Schema({
   prefix: { type: String, default: "" },
   email: { type: String, unique: true, required: true, trim: true, lowercase: true },
   password: { type: String, required: true, select: false },
+  passwordChangeFailCount: { type: Number, default: 0 },
+  passwordChangeFirstFailAt: { type: Date, default: null },
+  passwordChangeLockedUntil: { type: Date, default: null },
   date: { type: Date, default: Date.now },
   isVerified: { type: Boolean, default: false },
   confirm: { type: String, default: "", select: false }, // code hashé
