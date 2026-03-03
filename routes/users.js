@@ -440,6 +440,27 @@ router.post("/delete-account", authenticate, async (req, res) => {
       console.error("Erreur suppression exceptionvisible :", err);
     });
 
+    // Nettoyage des données liées au compte (Quizz, Cloud, fichiers GCS cloud).
+    try {
+      const userPrefix = await resolveUserFilePrefix(userObjectId);
+      const uniqueClassIds = Array.from(
+        new Set(classObjectIds.map((id) => String(id)))
+      ).map((id) => new mongoose.Types.ObjectId(id));
+
+      await Promise.allSettled([
+        Quizz.deleteMany({ id_user: userObjectId }),
+        Cloud.deleteMany({ id_user: userObjectId }),
+        ...uniqueClassIds.map((classeId) =>
+          deleteUserCloudFilesFromGcs({ classeId, userPrefix })
+        ),
+      ]);
+    } catch (cleanupError) {
+      console.warn(
+        "Nettoyage delete-account ignore :",
+        cleanupError?.message || cleanupError
+      );
+    }
+
     const deletion = await User.deleteOne({ _id: userObjectId });
     const deleted =
       deletion?.deletedCount ?? deletion?.n ?? deletion?.nRemoved ?? 0;
