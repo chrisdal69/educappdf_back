@@ -902,7 +902,7 @@ router.post("/login", async (req, res) => {
       !bcrypt.compareSync(password, data.password) ||
       !data.isVerified ||
       data.active === false
-    ) {
+    ) { 
       return res
         .status(401)
         .json({ message: "Compte inexistant ou non vérifié" });
