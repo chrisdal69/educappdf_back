@@ -2,8 +2,8 @@
   {
     "origin": [
       "https://mathsapp.fr",
-      "https://mathsapp-front.vercel.app",
-      "https://mathsapp-testfront.vercel.app",
+      "https://educappdf-front.vercel.app",
+      "https://educappdf-testfront.vercel.app",
       "http://localhost:3000",
       "http://localhost:3001"
     ],
