@@ -1051,6 +1051,51 @@ const buildFlashExportZipName = (card, id) => {
   return `${safe || "flash"}.zip`;
 };
 
+const buildCardExportZipName = (card, id) => {
+  const parts = ["card"];
+  const repertoire = (card?.repertoire ?? "").toString().trim();
+  if (repertoire) parts.push(repertoire);
+  const num =
+    typeof card?.num !== "undefined" && card?.num !== null
+      ? `${card.num}`.trim()
+      : "";
+  if (num) parts.push(`tag${num}`);
+  if (parts.length === 1 && id) parts.push(`${id}`);
+  const base = parts.join("_");
+  const safe = base
+    .replace(/[^a-zA-Z0-9_-]+/g, "_")
+    .replace(/_+/g, "_")
+    .replace(/^_+|_+$/g, "")
+    .slice(0, 80);
+  return `${safe || "card"}.zip`;
+};
+
+const toSafeZipRelativePath = (value) => {
+  if (!value || typeof value !== "string") return null;
+  const normalized = value.replace(/\\/g, "/").replace(/^\/+/, "");
+  if (!normalized) return null;
+  const parts = normalized.split("/").filter(Boolean);
+  if (!parts.length) return null;
+  if (parts.some((p) => p === "." || p === "..")) return null;
+  return parts.join("/");
+};
+
+const allowedImportExtensions = new Set([
+  ...allowedFileExtensions,
+  ...allowedBgExtensions,
+  ...allowedFlashImageExtensions,
+]);
+
+const normalizeImportRelativePath = (value) => {
+  const normalized = toSafeZipRelativePath(value);
+  if (!normalized) return null;
+  if (normalized.length > 400) return null;
+  const segments = normalized.split("/");
+  if (segments.some((seg) => seg.length > 120)) return null;
+  if (segments.some((seg) => !/^[a-zA-Z0-9._-]+$/.test(seg))) return null;
+  return normalized;
+};
+
 const extractSingleFile = (files) => {
   if (!files || typeof files !== "object") {
     return null;
@@ -1151,6 +1196,76 @@ const buildBlurBuffer = async (buffer, format) => {
     return null;
   }
 };
+
+router.get("/:id/export/zip", requireCardScopedAdmin, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const card = await Card.findById(id).lean();
+    if (!card) {
+      return res.status(404).json({ error: "Carte introuvable." });
+    }
+
+    const fileName = buildCardExportZipName(card, id);
+    res.setHeader("Content-Type", "application/zip");
+    res.setHeader("Content-Disposition", `attachment; filename="${fileName}"`);
+    res.setHeader("Cache-Control", "no-store");
+
+    const archive = archiver("zip", { zlib: { level: 9 } });
+    archive.on("warning", (err) => {
+      console.warn("Archive warning", err);
+    });
+    archive.on("error", (err) => {
+      console.error("Erreur export zip card", err);
+      if (!res.headersSent) {
+        return res.status(500).json({ error: "Erreur lors de l'export." });
+      }
+      res.end();
+    });
+
+    archive.pipe(res);
+    archive.append(JSON.stringify(card, null, 2), { name: "card.json" });
+
+    let sanitizedRepertoire = null;
+    try {
+      sanitizedRepertoire = sanitizeStorageSegment(card.repertoire, "Repertoire");
+    } catch (error) {
+      sanitizedRepertoire = null;
+    }
+    const sanitizedClasse = await resolveClasseDirectoryname(card.classe);
+    const tagNumber = normalizeTagNumber(card.num);
+
+    if (sanitizedRepertoire && sanitizedClasse && tagNumber !== null) {
+      const tagPrefix = buildCardTagPrefix({
+        repertoireSegment: sanitizedRepertoire,
+        tagNumber: Math.trunc(tagNumber),
+        classeSegment: sanitizedClasse,
+      });
+
+      const [files] = await bucket.getFiles({ prefix: tagPrefix });
+      for (const fileRef of files) {
+        const objectName = fileRef?.name || "";
+        if (!objectName || objectName.endsWith("/")) continue;
+        if (!objectName.startsWith(tagPrefix)) continue;
+        const relative = toSafeZipRelativePath(objectName.slice(tagPrefix.length));
+        if (!relative) continue;
+        const stream = bucket.file(objectName).createReadStream();
+        stream.on("error", (err) => {
+          console.warn("Erreur lecture fichier export card", objectName, err);
+        });
+        archive.append(stream, { name: `files/${relative}` });
+      }
+    }
+
+    await archive.finalize();
+    return null;
+  } catch (error) {
+    console.error("GET /cards/:id/export/zip", error);
+    if (!res.headersSent) {
+      return res.status(500).json({ error: "Erreur lors de l'export." });
+    }
+    res.end();
+  }
+});
 
 router.get("/:id/flash/export/zip", requireCardScopedAdmin, async (req, res) => {
   try {
@@ -1765,6 +1880,247 @@ router.post("/:id/bg/upload", requireCardScopedAdmin, async (req, res) => {
   } catch (err) {
     console.error("POST /cards/:id/bg/upload", err);
     res.status(500).json({ error: "Erreur lors de l'upload de l'image." });
+  }
+});
+
+router.post("/:id/import/sign", requireCardScopedAdmin, async (req, res) => {
+  const { id } = req.params;
+  const rawPath =
+    typeof req.body?.path === "string"
+      ? req.body.path
+      : typeof req.body?.relativePath === "string"
+        ? req.body.relativePath
+        : "";
+  const relativePath = normalizeImportRelativePath(rawPath);
+  const rawType = typeof req.body?.type === "string" ? req.body.type.trim() : "";
+  const rawSize = req.body?.size;
+
+  if (!relativePath) {
+    return res.status(400).json({ error: "Chemin de fichier invalide." });
+  }
+  const ext = path.extname(relativePath).toLowerCase();
+  if (!ext || !allowedImportExtensions.has(ext)) {
+    return res.status(400).json({ error: "Extension de fichier non autorisee." });
+  }
+  const size = Number(rawSize);
+  if (!Number.isFinite(size) || size <= 0) {
+    return res.status(400).json({ error: "Taille de fichier invalide." });
+  }
+  if (size > MAX_FILE_BYTES) {
+    return res
+      .status(400)
+      .json({ error: "Fichier trop volumineux (100 Mo max)." });
+  }
+
+  try {
+    const card = await Card.findById(id).lean();
+    if (!card) {
+      return res.status(404).json({ error: "Carte introuvable." });
+    }
+    const sanitizedRepertoire = sanitizeStorageSegment(card.repertoire, "Repertoire");
+    if (!sanitizedRepertoire) {
+      return res.status(400).json({ error: "Repertoire manquant." });
+    }
+    const sanitizedClasse = await resolveClasseDirectoryname(card.classe);
+    const tagNumber = normalizeTagNumber(card.num);
+    if (!sanitizedClasse || tagNumber === null) {
+      return res.status(400).json({ error: "Tag introuvable pour cette carte." });
+    }
+
+    const tagPrefix = buildCardTagPrefix({
+      repertoireSegment: sanitizedRepertoire,
+      tagNumber: Math.trunc(tagNumber),
+      classeSegment: sanitizedClasse,
+    });
+
+    const objectPath = `${tagPrefix}${relativePath}`;
+    const fileRef = bucket.file(objectPath);
+    const contentType = rawType || "application/octet-stream";
+
+    const [signedUrl] = await fileRef.getSignedUrl({
+      version: "v4",
+      action: "write",
+      expires: Date.now() + 15 * 60 * 1000,
+      contentType,
+    });
+
+    return res.json({
+      result: {
+        url: signedUrl,
+        objectPath,
+        contentType,
+        path: relativePath,
+        publicUrl: `https://storage.googleapis.com/${bucketName}/${objectPath}`,
+      },
+    });
+  } catch (err) {
+    console.error("POST /cards/:id/import/sign", err);
+    return res.status(500).json({ error: "Erreur lors de la preparation de l'upload." });
+  }
+});
+
+router.post("/:id/import/confirm", requireCardScopedAdmin, async (req, res) => {
+  const { id } = req.params;
+  const rawPath =
+    typeof req.body?.path === "string"
+      ? req.body.path
+      : typeof req.body?.relativePath === "string"
+        ? req.body.relativePath
+        : "";
+  const relativePath = normalizeImportRelativePath(rawPath);
+  if (!relativePath) {
+    return res.status(400).json({ error: "Chemin de fichier invalide." });
+  }
+  const ext = path.extname(relativePath).toLowerCase();
+  if (!ext || !allowedImportExtensions.has(ext)) {
+    return res.status(400).json({ error: "Extension de fichier non autorisee." });
+  }
+
+  try {
+    const card = await Card.findById(id).lean();
+    if (!card) {
+      return res.status(404).json({ error: "Carte introuvable." });
+    }
+
+    const sanitizedRepertoire = sanitizeStorageSegment(card.repertoire, "Repertoire");
+    if (!sanitizedRepertoire) {
+      return res.status(400).json({ error: "Repertoire manquant." });
+    }
+    const sanitizedClasse = await resolveClasseDirectoryname(card.classe);
+    const tagNumber = normalizeTagNumber(card.num);
+    if (!sanitizedClasse || tagNumber === null) {
+      return res.status(400).json({ error: "Tag introuvable pour cette carte." });
+    }
+
+    const tagPrefix = buildCardTagPrefix({
+      repertoireSegment: sanitizedRepertoire,
+      tagNumber: Math.trunc(tagNumber),
+      classeSegment: sanitizedClasse,
+    });
+
+    const objectPath = `${tagPrefix}${relativePath}`;
+    const fileRef = bucket.file(objectPath);
+    const [exists] = await fileRef.exists();
+    if (!exists) {
+      return res
+        .status(404)
+        .json({ error: "Fichier introuvable sur le stockage." });
+    }
+
+    let metadata;
+    try {
+      [metadata] = await fileRef.getMetadata();
+    } catch (err) {
+      metadata = null;
+    }
+    const storedSize = Number(metadata?.size);
+    if (Number.isFinite(storedSize) && storedSize > MAX_FILE_BYTES) {
+      try {
+        await fileRef.delete({ ignoreNotFound: true });
+      } catch (err) {
+        console.warn("Suppression fichier trop volumineux echouee.", err);
+      }
+      return res
+        .status(400)
+        .json({ error: "Fichier trop volumineux (100 Mo max)." });
+    }
+
+    await makePublicIfAllowed(fileRef, "le fichier");
+
+    return res.json({
+      result: {
+        ok: true,
+        objectPath,
+        path: relativePath,
+        publicUrl: `https://storage.googleapis.com/${bucketName}/${objectPath}`,
+      },
+    });
+  } catch (err) {
+    console.error("POST /cards/:id/import/confirm", err);
+    return res
+      .status(500)
+      .json({ error: "Erreur lors de la confirmation de l'upload." });
+  }
+});
+
+router.post("/:id/import/apply", requireCardScopedAdmin, async (req, res) => {
+  const { id } = req.params;
+  const raw = req.body?.card ?? req.body;
+  if (!raw || typeof raw !== "object") {
+    return res.status(400).json({ error: "Payload invalide." });
+  }
+
+  const update = {};
+  if (Object.prototype.hasOwnProperty.call(raw, "cloud")) {
+    update.cloud = Boolean(raw.cloud);
+  }
+  if (Object.prototype.hasOwnProperty.call(raw, "bg")) {
+    const bg = typeof raw.bg === "string" ? raw.bg.trim() : "";
+    update.bg = bg && isSafeFileName(bg) ? bg : "";
+  }
+  if (Object.prototype.hasOwnProperty.call(raw, "titre")) {
+    update.titre = typeof raw.titre === "string" ? raw.titre.trim() : "";
+  }
+  if (Object.prototype.hasOwnProperty.call(raw, "content")) {
+    if (!Array.isArray(raw.content)) {
+      return res.status(400).json({ error: "Le champ content doit etre un tableau." });
+    }
+    update.content = raw.content;
+  }
+  if (Object.prototype.hasOwnProperty.call(raw, "contentVersion")) {
+    const version = Number(raw.contentVersion);
+    update.contentVersion = Number.isInteger(version) && version > 0 ? version : 1;
+  }
+  if (Object.prototype.hasOwnProperty.call(raw, "evalQuizz")) {
+    update.evalQuizz =
+      typeof raw.evalQuizz === "string" ? raw.evalQuizz.trim() : "non";
+  }
+  if (Object.prototype.hasOwnProperty.call(raw, "resultatQuizz")) {
+    update.resultatQuizz = Boolean(raw.resultatQuizz);
+  }
+  if (Object.prototype.hasOwnProperty.call(raw, "visible")) {
+    update.visible = Boolean(raw.visible);
+  }
+
+  if (Object.prototype.hasOwnProperty.call(raw, "fichiers")) {
+    const list = Array.isArray(raw.fichiers) ? raw.fichiers : [];
+    const sanitized = list
+      .filter(Boolean)
+      .map((f) => {
+        const txt = typeof f?.txt === "string" ? f.txt.trim() : "";
+        const hover = typeof f?.hover === "string" ? f.hover.trim() : "";
+        const href = typeof f?.href === "string" ? f.href.trim() : "";
+        const visible = typeof f?.visible === "boolean" ? f.visible : true;
+        if (!href || !isSafeFileName(href)) return null;
+        const ext = path.extname(href).toLowerCase();
+        if (!ext || !allowedFileExtensions.has(ext)) return null;
+        return { txt, href, visible, hover };
+      })
+      .filter(Boolean);
+    update.fichiers = sanitized;
+  }
+
+  if (Object.prototype.hasOwnProperty.call(raw, "flash")) {
+    update.flash = sanitizeFlashArray(raw.flash || []);
+  }
+  if (Object.prototype.hasOwnProperty.call(raw, "video")) {
+    update.video = sanitizeVideoArray(raw.video || []);
+  }
+  if (Object.prototype.hasOwnProperty.call(raw, "quizz")) {
+    update.quizz = Array.isArray(raw.quizz) ? raw.quizz.filter(Boolean) : [];
+  }
+
+  try {
+    const updatedCard = await Card.findByIdAndUpdate(id, update, {
+      new: true,
+    }).lean();
+    if (!updatedCard) {
+      return res.status(404).json({ error: "Carte introuvable." });
+    }
+    return res.json({ result: updatedCard });
+  } catch (err) {
+    console.error("POST /cards/:id/import/apply", err);
+    return res.status(500).json({ error: "Erreur lors de l'import." });
   }
 });
 
