@@ -25,7 +25,8 @@ if (NODE_ENV === "production") {
     credentials: serviceAccount,
   });
 } else {
-  storage = new Storage({ keyFilename: "config/gcs-key.json" });
+  const keyFilename = path.resolve(__dirname, "..", "config", "gcs-key.json");
+  storage = new Storage({ keyFilename });
 }
 const bucketName = process.env.BUCKET_NAME || "educapp";
 const bucket = storage.bucket(bucketName);

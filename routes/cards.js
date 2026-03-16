@@ -102,7 +102,8 @@ if (NODE_ENV === "production") {
     credentials: serviceAccount,
   });
 } else {
-  storage = new Storage({ keyFilename: "config/gcs-key.json" });
+  const keyFilename = path.resolve(__dirname, "..", "config", "gcs-key.json");
+  storage = new Storage({ keyFilename });
 }
 const bucketName = process.env.BUCKET_NAME || "educapp";
 const bucket = storage.bucket(bucketName);
@@ -2855,7 +2856,11 @@ router.post("/:id/files", requireCardScopedAdmin, async (req, res) => {
     });
   } catch (err) {
     console.error("POST /cards/:id/files", err);
-    res.status(500).json({ error: "Erreur lors de l'upload du fichier." });
+    const message =
+      NODE_ENV === "production"
+        ? "Erreur lors de l'upload du fichier."
+        : `Erreur lors de l'upload du fichier. (${err?.message || err})`;
+    res.status(500).json({ error: message });
   }
 });
 
