@@ -1094,7 +1094,9 @@ const normalizeImportRelativePath = (value) => {
   if (normalized.length > 400) return null;
   const segments = normalized.split("/");
   if (segments.some((seg) => seg.length > 120)) return null;
-  if (segments.some((seg) => !/^[a-zA-Z0-9._-]+$/.test(seg))) return null;
+  // Accepte les noms de fichiers exportés (espaces, parenthèses, accents...),
+  // tout en bloquant les caractères de contrôle.
+  if (segments.some((seg) => /[\u0000-\u001f\u007f]/.test(seg))) return null;
   return normalized;
 };
 
