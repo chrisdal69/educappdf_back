@@ -172,6 +172,7 @@ const toBlurFileName = (filename) => {
 
 router.get("/", async (req, res) => {
   try {
+
     const rawClassId = Array.isArray(req.query?.classId)
       ? req.query.classId[0]
       : req.query?.classId;
