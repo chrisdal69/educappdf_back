@@ -1647,6 +1647,7 @@ router.delete(
 
       const userId = student?.id_user ? String(student.id_user) : null;
       const wasRegistered = student?.free === false && !!userId;
+      let cleanupStats = null;
 
       if (wasRegistered && mongoose.Types.ObjectId.isValid(userId)) {
         const userObjectId = new mongoose.Types.ObjectId(userId);
@@ -1671,9 +1672,102 @@ router.delete(
         ]).catch((err) => {
           console.error("Erreur suppression follow:", err);
         });
+
+        await Classe.collection
+          .updateOne(
+            { _id: classObjectId },
+            { $pull: { "repertoires.$[].teachers": userObjectId } }
+          )
+          .catch((err) => {
+            console.error("Erreur suppression teacher rights :", err);
+          });
+
+        // Nettoyage des donnees liees a cette classe (Quizz, Cloud, fichiers GCS cloud).
+        try {
+          const cardIds = await Card.find({ classe: classObjectId })
+            .select("_id")
+            .lean()
+            .then((rows) => rows.map((r) => r._id).filter(Boolean));
+
+          const legacyClassFilter = cardIds.length
+            ? {
+                id_card: { $in: cardIds },
+                $or: [{ id_classe: { $exists: false } }, { id_classe: null }],
+              }
+            : null;
+
+          const userPrefix = await resolveUserFilePrefix(userObjectId);
+
+          const settled = await Promise.allSettled([
+            (async () => {
+              const primary = await Quizz.deleteMany({
+                id_user: userObjectId,
+                id_classe: classObjectId,
+              });
+              const primaryDeleted = primary?.deletedCount ?? primary?.n ?? 0;
+
+              let legacyDeleted = 0;
+              if (legacyClassFilter) {
+                const legacy = await Quizz.deleteMany({
+                  id_user: userObjectId,
+                  ...legacyClassFilter,
+                });
+                legacyDeleted = legacy?.deletedCount ?? legacy?.n ?? 0;
+              }
+
+              return { deleted: primaryDeleted + legacyDeleted };
+            })(),
+            (async () => {
+              const primary = await Cloud.deleteMany({
+                id_user: userObjectId,
+                id_classe: classObjectId,
+              });
+              const primaryDeleted = primary?.deletedCount ?? primary?.n ?? 0;
+
+              let legacyDeleted = 0;
+              if (legacyClassFilter) {
+                const legacy = await Cloud.deleteMany({
+                  id_user: userObjectId,
+                  ...legacyClassFilter,
+                });
+                legacyDeleted = legacy?.deletedCount ?? legacy?.n ?? 0;
+              }
+
+              return { deleted: primaryDeleted + legacyDeleted };
+            })(),
+            deleteUserCloudFilesFromGcs({ classeId: classObjectId, userPrefix }),
+          ]);
+
+          const quizzResult = settled[0];
+          const cloudResult = settled[1];
+          const gcsResult = settled[2];
+
+          const quizzDeleted =
+            quizzResult?.status === "fulfilled"
+              ? Number(quizzResult.value?.deleted) || 0
+              : 0;
+          const cloudDeleted =
+            cloudResult?.status === "fulfilled"
+              ? Number(cloudResult.value?.deleted) || 0
+              : 0;
+          const gcsDeleted =
+            gcsResult?.status === "fulfilled"
+              ? Number(gcsResult.value?.deleted) || 0
+              : 0;
+
+          cleanupStats = { quizzDeleted, cloudDeleted, gcsDeleted };
+        } catch (cleanupError) {
+          console.warn(
+            "Nettoyage admin-unsubscribe ignore :",
+            cleanupError?.message || cleanupError
+          );
+        }
       }
 
-      return res.status(200).json({ message: "Désinscription réalisée" });
+      return res.status(200).json({
+        message: "Désinscription réalisée",
+        cleanup: cleanupStats || undefined,
+      });
     } catch (error) {
       if (handleYupError(error, res)) return;
       console.error("Erreur unsubscribe student:", error);
