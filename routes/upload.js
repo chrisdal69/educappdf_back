@@ -702,6 +702,147 @@ router.post("/", authenticate, async (req, res) => {
 
 /************************************************************************* */
 
+/* DEBUT Upload admin dans cloud au nom d'un utilisateur (prefix) */
+router.post("/addA", requireUploadScopedAdmin, async (req, res) => {
+  try {
+    const parent = validatePathComponent(req.body.parent, "Dossier parent");
+    const { repertoire, num } = parseCloudRepertoireAndNum({
+      repertoireRaw: req.body.repertoire,
+      numRaw: req.body.num,
+    });
+    const sanitizedRepertoire = validatePathComponent(
+      repertoire,
+      "Nom de répertoire"
+    );
+
+    if (!allowedParents.includes(parent)) {
+      return res.status(403).send("Dossier parent non autorisé.");
+    }
+
+    let repertoireBucket = `${parent}/${sanitizedRepertoire}`;
+    if (parent === "cloud") {
+      const cloudFolderPrefix = await buildCloudFolderPrefix({
+        user: req.user,
+        repertoire: sanitizedRepertoire,
+        num,
+      });
+      const tagNumber = parseTagNumber(num);
+      if (tagNumber === null) {
+        return res.status(400).send("Numero de tag invalide.");
+      }
+      const tagFolder = `tag${tagNumber}`;
+      const cloudParent = cloudFolderPrefix.replace(
+        new RegExp(`/${tagFolder}/$`),
+        ""
+      );
+      await createPublicFolder(cloudParent, tagFolder);
+      repertoireBucket = cloudFolderPrefix.replace(/\/$/, "");
+    } else {
+      await createPublicFolder(parent, sanitizedRepertoire);
+    }
+
+    const requestedPrefixRaw =
+      typeof req.body.prefix === "string" ? req.body.prefix.trim() : "";
+    if (!requestedPrefixRaw) {
+      return res.status(400).json({ result: false, error: "Prefix manquant." });
+    }
+    if (
+      requestedPrefixRaw.includes("/") ||
+      requestedPrefixRaw.includes("\\") ||
+      requestedPrefixRaw.includes("..") ||
+      requestedPrefixRaw.length > 100
+    ) {
+      return res.status(400).json({ result: false, error: "Prefix invalide." });
+    }
+
+    const targetUser = await User.findOne({ prefix: requestedPrefixRaw })
+      .select("prefix")
+      .lean();
+    const safeName =
+      typeof targetUser?.prefix === "string" ? targetUser.prefix.trim() : "";
+    if (!safeName) {
+      return res
+        .status(400)
+        .json({ result: false, error: "Utilisateur introuvable pour ce prefix." });
+    }
+
+    if (!req.files || Object.keys(req.files).length === 0) {
+      return res.status(400).send("Aucun fichier reçu");
+    }
+
+    const fichiersCopies = [];
+    const fichiers = Array.isArray(req.files.fichiers)
+      ? req.files.fichiers
+      : [req.files.fichiers];
+
+    for (const file of fichiers) {
+      const originalRaw = (file.name || "").toString();
+      const originalBase = originalRaw.split(/[\\/]/).pop();
+      let original;
+      try {
+        original = validateFileName(originalBase);
+      } catch (e) {
+        console.warn(`Nom de fichier invalide ignoré : ${originalBase}`);
+        throw new Error(`Nom de fichier invalide: ${originalBase}`);
+      }
+
+      const ext = path.extname(original).toLowerCase();
+      if (!allowedExtensions.includes(ext)) {
+        throw new Error(`Extension invalide pour: ${original}`);
+      }
+
+      if (file.size > 5_000_000) {
+        throw new Error(`Taille de fichier invalide: ${original}`);
+      }
+
+      const destFileName = `${repertoireBucket}/${safeName}___${original}`;
+      const fileRef = bucket.file(destFileName);
+
+      if (file.data && Buffer.isBuffer(file.data)) {
+        await fileRef.save(file.data, {
+          resumable: false,
+          metadata: { contentType: file.mimetype },
+        });
+      } else if (file.tempFilePath && fs.existsSync(file.tempFilePath)) {
+        await storage.bucket(bucketName).upload(file.tempFilePath, {
+          destination: destFileName,
+          metadata: { contentType: file.mimetype },
+          resumable: false,
+        });
+      } else {
+        throw new Error(`Source de fichier indisponible pour: ${original}`);
+      }
+
+      fichiersCopies.push({
+        name: original,
+        url: `https://storage.googleapis.com/${bucketName}/${destFileName}`,
+      });
+    }
+
+    if (fichiersCopies.length === 0) {
+      return res.status(400).json({
+        result: false,
+        error: "Aucun fichier accepté (nom/extension/taille invalides)",
+      });
+    }
+
+    res.json({
+      result: true,
+      files: fichiersCopies,
+    });
+  } catch (err) {
+    console.error("Erreur réception sur le back /addA :", err);
+    const status =
+      err.message?.includes("invalide") || err.message?.includes("manquant")
+        ? 400
+        : 500;
+    res
+      .status(status)
+      .json({ result: false, error: err.message, message: err.message });
+  }
+});
+/* FIN Upload admin dans cloud au nom d'un utilisateur (prefix) */
+
 /* DEBUT supprimer un fichier pour l'admin */
 router.post("/delete", authenticate, async (req, res) => {
   try {
