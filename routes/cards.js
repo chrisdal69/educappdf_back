@@ -2054,6 +2054,13 @@ router.post("/:id/import/apply", requireCardScopedAdmin, async (req, res) => {
     return res.status(400).json({ error: "Payload invalide." });
   }
 
+  const normalizeFlashImageName = (value) => {
+    const trimmed = typeof value === "string" ? value.trim() : "";
+    if (!trimmed) return "";
+    const base = path.basename(trimmed);
+    return base && isAllowedFlashImageName(base) ? base : "";
+  };
+
   const update = {};
   if (Object.prototype.hasOwnProperty.call(raw, "cloud")) {
     update.cloud = Boolean(raw.cloud);
@@ -2105,7 +2112,11 @@ router.post("/:id/import/apply", requireCardScopedAdmin, async (req, res) => {
   }
 
   if (Object.prototype.hasOwnProperty.call(raw, "flash")) {
-    update.flash = sanitizeFlashArray(raw.flash || []);
+    update.flash = sanitizeFlashArray(raw.flash || []).map((entry) => ({
+      ...entry,
+      imquestion: normalizeFlashImageName(entry?.imquestion),
+      imreponse: normalizeFlashImageName(entry?.imreponse),
+    }));
   }
   if (Object.prototype.hasOwnProperty.call(raw, "video")) {
     update.video = sanitizeVideoArray(raw.video || []);
@@ -2115,6 +2126,62 @@ router.post("/:id/import/apply", requireCardScopedAdmin, async (req, res) => {
   }
 
   try {
+    // Verifie que les fichiers references existent bien sur le stockage,
+    // pour eviter de creer une carte incoherente (liens cassés).
+    const baseCard = await Card.findById(id).select("repertoire classe num").lean();
+    if (!baseCard) {
+      return res.status(404).json({ error: "Carte introuvable." });
+    }
+    const sanitizedRepertoire = sanitizeStorageSegment(
+      baseCard.repertoire,
+      "Repertoire"
+    );
+    const sanitizedClasse = await resolveClasseDirectoryname(baseCard.classe);
+    const tagNumber = normalizeTagNumber(baseCard.num);
+    if (!sanitizedRepertoire || !sanitizedClasse || tagNumber === null) {
+      return res.status(400).json({ error: "Tag introuvable pour cette carte." });
+    }
+    const tagPrefix = buildCardTagPrefix({
+      repertoireSegment: sanitizedRepertoire,
+      tagNumber: Math.trunc(tagNumber),
+      classeSegment: sanitizedClasse,
+    });
+
+    const referenced = new Set();
+    if (update.bg) {
+      referenced.add(update.bg);
+    }
+    if (Array.isArray(update.fichiers)) {
+      update.fichiers.forEach((f) => {
+        if (f?.href) referenced.add(f.href);
+      });
+    }
+    if (Array.isArray(update.flash)) {
+      update.flash.forEach((f) => {
+        if (f?.imquestion) referenced.add(f.imquestion);
+        if (f?.imreponse) referenced.add(f.imreponse);
+      });
+    }
+
+    if (referenced.size) {
+      const names = Array.from(referenced);
+      const checks = await Promise.all(
+        names.map(async (name) => {
+          const objectPath = `${tagPrefix}${name}`;
+          const [exists] = await bucket.file(objectPath).exists();
+          return exists ? null : name;
+        })
+      );
+      const missingFiles = checks.filter(Boolean);
+      if (missingFiles.length) {
+        return res.status(400).json({
+          error:
+            "Import refuse : fichier(s) reference(s) manquant(s) sur le stockage.",
+          missingFiles,
+        });
+      }
+    }
+
     const updatedCard = await Card.findByIdAndUpdate(id, update, {
       new: true,
     }).lean();
