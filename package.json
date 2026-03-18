@@ -4,6 +4,7 @@
   "private": true,
   "scripts": {
     "start": "nodemon ./bin/www",
+    "migrate:cards:add-classe": "node ./scripts/migrate-cards-add-classe.js",
     "migrate:cards-content": "node ./scripts/migrate-cards-content.js",
     "test:auth:manual": "node ./scripts/test-auth-manual.js",
     "test": "jest"

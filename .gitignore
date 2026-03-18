@@ -66,5 +66,4 @@ config/
 # cors pour le bucket google
 cors
 
-scripts/migrate-cards-content.js
-scripts/test-auth-manual.js
+scripts/
