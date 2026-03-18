@@ -36,6 +36,7 @@ const allowedOrigins = [
   "https://educappdf-front.vercel.app", // front en production
   "https://educappdf-testfront.vercel.app", // front en test
   "https://mathsapp.fr", // DNS
+  "https://www.mathsapp.fr",
 ];
 app.use(
   cors({
