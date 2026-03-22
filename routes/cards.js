@@ -1963,6 +1963,83 @@ router.post("/:id/import/sign", requireCardScopedAdmin, async (req, res) => {
   }
 });
 
+router.post("/:id/import/upload", requireCardScopedAdmin, async (req, res) => {
+  const { id } = req.params;
+  const rawPath =
+    typeof req.body?.path === "string"
+      ? req.body.path
+      : typeof req.body?.relativePath === "string"
+        ? req.body.relativePath
+        : "";
+  const relativePath = normalizeImportRelativePath(rawPath);
+  const rawType = typeof req.body?.type === "string" ? req.body.type.trim() : "";
+
+  if (!relativePath) {
+    return res.status(400).json({ error: "Chemin de fichier invalide." });
+  }
+  const ext = path.extname(relativePath).toLowerCase();
+  if (!ext || !allowedImportExtensions.has(ext)) {
+    return res.status(400).json({ error: "Extension de fichier non autorisee." });
+  }
+
+  try {
+    const card = await Card.findById(id).lean();
+    if (!card) {
+      return res.status(404).json({ error: "Carte introuvable." });
+    }
+    const sanitizedRepertoire = sanitizeStorageSegment(card.repertoire, "Repertoire");
+    if (!sanitizedRepertoire) {
+      return res.status(400).json({ error: "Repertoire manquant." });
+    }
+    const sanitizedClasse = await resolveClasseDirectoryname(card.classe);
+    const tagNumber = normalizeTagNumber(card.num);
+    if (!sanitizedClasse || tagNumber === null) {
+      return res.status(400).json({ error: "Tag introuvable pour cette carte." });
+    }
+
+    if (!req.files || Object.keys(req.files).length === 0) {
+      return res.status(400).json({ error: "Aucun fichier fourni." });
+    }
+
+    const uploadedFile = extractSingleFile(req.files);
+    if (!uploadedFile || !uploadedFile.data) {
+      return res.status(400).json({ error: "Fichier d'upload invalide." });
+    }
+
+    if (uploadedFile.size && uploadedFile.size > MAX_FILE_BYTES) {
+      return res
+        .status(400)
+        .json({ error: "Fichier trop volumineux (100 Mo max)." });
+    }
+
+    const tagPrefix = buildCardTagPrefix({
+      repertoireSegment: sanitizedRepertoire,
+      tagNumber: Math.trunc(tagNumber),
+      classeSegment: sanitizedClasse,
+    });
+
+    const objectPath = `${tagPrefix}${relativePath}`;
+    const fileRef = bucket.file(objectPath);
+    const contentType =
+      rawType || uploadedFile.mimetype || "application/octet-stream";
+
+    await uploadBufferToBucket(fileRef, uploadedFile.data, contentType);
+    await makePublicIfAllowed(fileRef, "le fichier");
+
+    return res.json({
+      result: {
+        ok: true,
+        objectPath,
+        path: relativePath,
+        publicUrl: `https://storage.googleapis.com/${bucketName}/${objectPath}`,
+      },
+    });
+  } catch (err) {
+    console.error("POST /cards/:id/import/upload", err);
+    return res.status(500).json({ error: "Erreur lors de l'upload du fichier." });
+  }
+});
+
 router.post("/:id/import/confirm", requireCardScopedAdmin, async (req, res) => {
   const { id } = req.params;
   const rawPath =
