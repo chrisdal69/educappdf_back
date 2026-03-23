@@ -1136,6 +1136,7 @@ router.post("/login/select-class", async (req, res) => {
       },
       process.env.ACCESS_TOKEN_SECRET,
       { expiresIn: "1h" }
+      //{ expiresIn: "1m" }
     );
 
     res.cookie("jwt", accessToken, buildCookieOptions());

@@ -64,6 +64,6 @@ typings/
 config/
 
 # cors pour le bucket google
-cors
+cors.json
 
 scripts/
