@@ -2,6 +2,7 @@
   "name": "uploadback",
   "version": "0.0.0",
   "private": true,
+  "packageManager": "yarn@1.22.22",
   "scripts": {
     "start": "nodemon ./bin/www",
     "migrate:cards:add-classe": "node ./scripts/migrate-cards-add-classe.js",
