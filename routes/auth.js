@@ -988,6 +988,7 @@ router.post("/login", async (req, res) => {
 
     return res.json({
       message: "Choisissez une classe",
+      pendingToken: pendingLoginToken,
       teachersClasses: teacherClassesSummary,
       followedClasses: followedClassesSummary,
     });
@@ -1015,7 +1016,7 @@ router.post("/login/select-class", async (req, res) => {
       { abortEarly: false } // pour obtenir toutes les erreurs a la fois
     );
 
-    const pendingToken = req.cookies.pending_login;
+    const pendingToken = req.cookies.pending_login || req.body.pendingToken;
     if (!pendingToken) {
       return res.status(401).json({ message: "Session de connexion expirée" });
     }
@@ -1144,6 +1145,7 @@ router.post("/login/select-class", async (req, res) => {
 
     return res.json({
       message: "Connexion réussie",
+      token: accessToken,
       email: user.email,
       nom: user.nom,
       prenom: user.prenom,
@@ -1410,7 +1412,11 @@ router.post("/reset-password", async (req, res) => {
 /* Route pour verif cookies (non utilisé) */
 router.get("/me", async (req, res) => {
   try {
-    const token = req.cookies.jwt;
+    const token =
+      req.cookies.jwt ||
+      (req.headers.authorization?.startsWith("Bearer ")
+        ? req.headers.authorization.slice(7)
+        : null);
     if (!token) return res.status(401).json({ error: "Non authentifié" });
 
     const decoded = jwt.verify(token, process.env.ACCESS_TOKEN_SECRET);

@@ -33,6 +33,7 @@ const cors = require("cors");
 const allowedOrigins = [
   "http://localhost:3001", // front en local
   "http://localhost:3000", // front en local
+  "http://localhost:8081", // expo web en local
   "https://educappdf-front.vercel.app", // front en production
   "https://educappdf-testfront.vercel.app", // front en test
   "https://mathsapp.fr", // DNS
