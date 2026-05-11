@@ -1007,8 +1007,9 @@ router.post("/login", async (req, res) => {
 });
 
 router.post("/login/select-class", async (req, res) => {
-  let { classId } = req.body;
+  let { classId, clientType } = req.body;
   classId = typeof classId === "string" ? classId.trim() : "";
+  const isMobile = clientType === "mobile";
 
   try {
     await selectClassSchema.validate(
@@ -1122,6 +1123,11 @@ router.post("/login/select-class", async (req, res) => {
         ? normalizedRepertoires.map((rep) => rep.slug)
         : Array.from(teacherSlugs);
 
+    const isAdminAnywhere = Array.isArray(user.follow) &&
+      user.follow.some((entry) =>
+        entry && typeof entry === "object" ? entry.role === "admin" : false
+      );
+
     const accessToken = jwt.sign(
       {
         userId: user._id,
@@ -1134,10 +1140,10 @@ router.post("/login/select-class", async (req, res) => {
         directoryname: selectedClass.directoryname,
         repertoires: normalizedRepertoires,
         adminRepertoires,
+        isAdminAnywhere,
       },
       process.env.ACCESS_TOKEN_SECRET,
-      { expiresIn: "1h" }
-      //{ expiresIn: "1m" }
+      { expiresIn: isMobile && role !== "admin" ? "7d" : "1h" }
     );
 
     res.cookie("jwt", accessToken, buildCookieOptions());
@@ -1155,6 +1161,7 @@ router.post("/login/select-class", async (req, res) => {
       directoryname: selectedClass.directoryname,
       repertoires: normalizedRepertoires,
       adminRepertoires,
+      isAdminAnywhere,
     });
   } catch (error) {
     if (error.name === "ValidationError") {
@@ -1431,6 +1438,7 @@ router.get("/me", async (req, res) => {
       directoryname,
       repertoires,
       adminRepertoires,
+      isAdminAnywhere,
     } = decoded || {};
 
     res.json({
@@ -1445,6 +1453,7 @@ router.get("/me", async (req, res) => {
         directoryname,
         repertoires,
         adminRepertoires,
+        isAdminAnywhere: !!isAdminAnywhere,
       },
     });
   } catch (err) {
