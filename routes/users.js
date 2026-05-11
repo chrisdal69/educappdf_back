@@ -18,7 +18,7 @@ const nodemailer = require("nodemailer");
 
 const NODE_ENV = process.env.NODE_ENV;
 let storage;
-if (NODE_ENV === "production") {
+if (process.env.GCP_KEY) {
   const serviceAccount = JSON.parse(process.env.GCP_KEY);
   storage = new Storage({
     projectId: serviceAccount.project_id,
@@ -83,67 +83,40 @@ const deleteUserCloudFilesFromGcs = async ({ classeId, userPrefix }) => {
   const directoryname = sanitizeStorageSegment(classe?.directoryname || "");
   if (!directoryname) return { deleted: 0 };
 
+  const classBasePrefix = `${`${gcsEnvFolder}`.replace(/^\/+|\/+$/g, "")}/${directoryname}/`;
   const filePrefix = `${trimmedPrefix}___`;
   let deletedCount = 0;
+  let pageToken = undefined;
 
-  const classBasePrefix = `${`${gcsEnvFolder}`.replace(/^\/+|\/+$/g, "")}/${directoryname}/`;
+  do {
+    const [files, nextQuery] = await bucket.getFiles({
+      prefix: classBasePrefix,
+      autoPaginate: false,
+      maxResults: 1000,
+      pageToken,
+    });
 
-  const listPrefixes = async ({ prefix, delimiter }) => {
-    const prefixes = new Set();
-    let pageToken = undefined;
-    do {
-      const [, nextQuery, apiResponse] = await bucket.getFiles({
-        prefix,
-        delimiter,
-        autoPaginate: false,
-        maxResults: 1000,
-        pageToken,
-      });
-      const nextPrefixes = Array.isArray(apiResponse?.prefixes) ? apiResponse.prefixes : [];
-      nextPrefixes.forEach((p) => prefixes.add(p));
-      pageToken = nextQuery?.pageToken;
-    } while (pageToken);
-    return Array.from(prefixes);
-  };
+    const userFiles = files.filter(
+      (f) =>
+        f?.name &&
+        !f.name.endsWith("/") &&
+        f.name.includes("/cloud/") &&
+        path.posix.basename(f.name).startsWith(filePrefix)
+    );
 
-  const repertoirePrefixes = await listPrefixes({ prefix: classBasePrefix, delimiter: "/" });
-
-  for (const repPrefix of repertoirePrefixes) {
-    const cloudRootPrefix = `${repPrefix}cloud/`;
-    const tagPrefixes = await listPrefixes({ prefix: cloudRootPrefix, delimiter: "/" });
-    const filteredTagPrefixes = tagPrefixes.filter((p) => /\/tag\d+\/$/.test(p));
-
-    for (const tagPrefix of filteredTagPrefixes) {
-      let pageToken = undefined;
-      do {
-        const [files, nextQuery] = await bucket.getFiles({
-          prefix: tagPrefix,
-          delimiter: "/",
-          autoPaginate: false,
-          maxResults: 1000,
-          pageToken,
-        });
-
-        const deletions = files
-          .filter((file) => file?.name && !file.name.endsWith("/"))
-          .filter((file) => path.posix.basename(file.name).startsWith(filePrefix))
-          .map((file) =>
-            file
-              .delete({ ignoreNotFound: true })
-              .then(() => {
-                deletedCount += 1;
-              })
-              .catch(() => null)
-          );
-
-        if (deletions.length) {
-          await Promise.allSettled(deletions);
-        }
-
-        pageToken = nextQuery?.pageToken;
-      } while (pageToken);
+    if (userFiles.length) {
+      await Promise.allSettled(
+        userFiles.map((f) =>
+          f
+            .delete({ ignoreNotFound: true })
+            .then(() => { deletedCount += 1; })
+            .catch(() => null)
+        )
+      );
     }
-  }
+
+    pageToken = nextQuery?.pageToken;
+  } while (pageToken);
 
   return { deleted: deletedCount };
 };

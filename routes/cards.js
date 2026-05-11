@@ -95,7 +95,7 @@ const requireCardScopedAdmin = requireScopedAdmin((req) =>
 
 const NODE_ENV = process.env.NODE_ENV;
 let storage;
-if (NODE_ENV === "production") {
+if (process.env.GCP_KEY) {
   const serviceAccount = JSON.parse(process.env.GCP_KEY);
   storage = new Storage({
     projectId: serviceAccount.project_id,
