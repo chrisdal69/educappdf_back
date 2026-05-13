@@ -170,6 +170,17 @@ const toBlurFileName = (filename) => {
   return `${filename.slice(0, lastDot)}Blur${filename.slice(lastDot)}`;
 };
 
+const toMobileFileName = (filename) => {
+  if (!filename || typeof filename !== "string") {
+    return null;
+  }
+  const lastDot = filename.lastIndexOf(".");
+  if (lastDot === -1) {
+    return `${filename}Mobile`;
+  }
+  return `${filename.slice(0, lastDot)}Mobile${filename.slice(lastDot)}`;
+};
+
 router.get("/", async (req, res) => {
   try {
 
@@ -1201,6 +1212,23 @@ const buildBlurBuffer = async (buffer, format) => {
   }
 };
 
+const buildMobileBuffer = async (buffer, format) => {
+  try {
+    let instance = sharp(buffer).resize({ width: 800, fit: "inside" });
+    if (format === ".jpg" || format === ".jpeg") {
+      instance = instance.jpeg({ quality: 75 });
+    } else if (format === ".png") {
+      instance = instance.png({ quality: 75 });
+    } else if (format === ".webp") {
+      instance = instance.webp({ quality: 75 });
+    }
+    return await instance.toBuffer();
+  } catch (err) {
+    console.warn("Impossible de générer la version mobile :", err);
+    return null;
+  }
+};
+
 router.get("/:id/export/zip", requireCardScopedAdmin, async (req, res) => {
   try {
     const { id } = req.params;
@@ -1821,10 +1849,13 @@ router.post("/:id/bg/upload", requireCardScopedAdmin, async (req, res) => {
     const uniqueBase = `${finalBase}_${Date.now()}`;
     const uniqueName = `${uniqueBase}${extension}`;
     const blurName = `${uniqueBase}Blur${extension}`;
+    const mobileName = `${uniqueBase}Mobile${extension}`;
     const objectPath = `${tagPrefix}${uniqueName}`;
     const blurPath = `${tagPrefix}${blurName}`;
+    const mobilePath = `${tagPrefix}${mobileName}`;
     const fileRef = bucket.file(objectPath);
     const blurRef = bucket.file(blurPath);
+    const mobileRef = bucket.file(mobilePath);
 
     if (card.bg) {
       const previousFile = bucket.file(
@@ -1850,6 +1881,19 @@ router.post("/:id/bg/upload", requireCardScopedAdmin, async (req, res) => {
             )
           );
       }
+
+      const prevMobileName = toMobileFileName(card.bg);
+      if (prevMobileName) {
+        bucket
+          .file(`${tagPrefix}${prevMobileName}`)
+          .delete({ ignoreNotFound: true })
+          .catch((err) =>
+            console.warn(
+              "Suppression de l'ancien background mobile échouée",
+              err
+            )
+          );
+      }
     }
 
     await uploadBufferToBucket(
@@ -1861,9 +1905,16 @@ router.post("/:id/bg/upload", requireCardScopedAdmin, async (req, res) => {
     if (blurBuffer) {
       await uploadBufferToBucket(blurRef, blurBuffer, uploadedFile.mimetype);
     }
+    const mobileBuffer = await buildMobileBuffer(uploadedFile.data, extension);
+    if (mobileBuffer) {
+      await uploadBufferToBucket(mobileRef, mobileBuffer, uploadedFile.mimetype);
+    }
     await makePublicIfAllowed(fileRef, "le fichier");
     if (blurBuffer) {
       await makePublicIfAllowed(blurRef, "le fichier floute");
+    }
+    if (mobileBuffer) {
+      await makePublicIfAllowed(mobileRef, "le fichier mobile");
     }
 
     const updatedCard = await Card.findByIdAndUpdate(
