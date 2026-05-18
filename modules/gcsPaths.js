@@ -27,9 +27,16 @@ const buildCardPrefix = ({ nodeEnv, gcsEnvFolder, classe, repertoire, tagNumber 
   return prefix ? `${prefix}/` : "";
 };
 
+const buildUserfilesFolderPrefix = ({ gcsEnvFolder, nodeEnv, classe, repertoire, tagNumber, userPrefix }) => {
+  const envFolder = gcsEnvFolder || getGcsEnvFolder(nodeEnv);
+  const prefix = joinGcsPath(envFolder, classe, repertoire, "userfiles", userPrefix, `tag${tagNumber}`);
+  return prefix ? `${prefix}/` : "";
+};
+
 module.exports = {
   getGcsEnvFolder,
   joinGcsPath,
   buildCardPrefix,
+  buildUserfilesFolderPrefix,
 };
 

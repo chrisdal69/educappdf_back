@@ -13,7 +13,8 @@ const {
 } = require("../middlewares/auth");
 const Classe = require("../models/classes");
 const User = require("../models/users");
-const { getGcsEnvFolder, buildCardPrefix } = require("../modules/gcsPaths");
+const { getGcsEnvFolder, buildCardPrefix, buildUserfilesFolderPrefix } = require("../modules/gcsPaths");
+const UserFile = require("../models/userfiles");
 
 const requireUploadScopedAdmin = requireScopedAdmin((req) => {
   const { repertoire } = parseCloudRepertoireAndNum({
@@ -1110,5 +1111,221 @@ router.get("/dashboard", verifyToken, (req, res) => {
   res.json({ message: `Bienvenue ${req.user.prenom} ${req.user.nom}` });
 });
 /* FIN exemple route pour utiliser veriyToken */
+
+/* =========================================================
+   USERFILES — dépôts élèves (cours manuscrits)
+   ========================================================= */
+
+const buildUserfilesFolderPrefixForUser = async ({ user, repertoire, num }) => {
+  const sanitizedRepertoire = validatePathComponent(repertoire, "Nom de répertoire");
+  const tagNumber = parseTagNumber(num);
+  if (tagNumber === null) throw new Error("Numero de tag invalide.");
+  const directoryname = await resolveClasseDirectoryname(user?.classId);
+  if (!directoryname) throw new Error("Classe non sélectionnée.");
+  const userPrefix = await resolveUserFilePrefix(user);
+  if (!userPrefix) throw new Error("Prefix utilisateur manquant.");
+  const prefix = buildUserfilesFolderPrefix({
+    gcsEnvFolder,
+    classe: directoryname,
+    repertoire: sanitizedRepertoire,
+    tagNumber,
+    userPrefix,
+  });
+  return { prefix, userPrefix, tagNumber, directoryname, sanitizedRepertoire };
+};
+
+/* Génère une signed URL pour upload direct depuis le mobile (max 20 Mo) */
+router.post("/userfiles/signed-url", authenticate, async (req, res) => {
+  try {
+    const { cardId, repertoire, num, filename } = req.body;
+
+    if (!cardId || !mongoose.Types.ObjectId.isValid(cardId)) {
+      return res.status(400).json({ error: "cardId invalide." });
+    }
+    const safeFilename = validateFileName(filename, "Nom du fichier");
+    if (path.extname(safeFilename).toLowerCase() !== ".pdf") {
+      return res.status(400).json({ error: "Seuls les fichiers PDF sont acceptés." });
+    }
+
+    const { prefix, tagNumber } = await buildUserfilesFolderPrefixForUser({
+      user: req.user,
+      repertoire,
+      num,
+    });
+
+    const tagFolder = `tag${tagNumber}`;
+    const folderParent = prefix.replace(new RegExp(`/${tagFolder}/$`), "");
+    await createPublicFolder(folderParent, tagFolder);
+
+    const gcsFilePath = `${prefix}${safeFilename}`;
+    const fileRef = bucket.file(gcsFilePath);
+    const [signedUrl] = await fileRef.getSignedUrl({
+      version: "v4",
+      action: "write",
+      expires: Date.now() + 15 * 60 * 1000,
+      contentType: "application/pdf",
+    });
+
+    const publicUrl = `https://storage.googleapis.com/${bucketName}/${gcsFilePath}`;
+    res.json({ signedUrl, publicUrl, filename: safeFilename });
+  } catch (err) {
+    console.error("POST /userfiles/signed-url", err);
+    const status = err.message?.includes("invalide") || err.message?.includes("manquant") ? 400 : 500;
+    res.status(status).json({ error: err.message });
+  }
+});
+
+/* Confirme l'upload et enregistre en base */
+router.post("/userfiles/confirm", authenticate, async (req, res) => {
+  try {
+    const { cardId, filename, displayName } = req.body;
+
+    if (!cardId || !mongoose.Types.ObjectId.isValid(cardId)) {
+      return res.status(400).json({ error: "cardId invalide." });
+    }
+    if (!displayName || typeof displayName !== "string" || !displayName.trim()) {
+      return res.status(400).json({ error: "Nom d'affichage manquant." });
+    }
+    const safeFilename = validateFileName(filename, "Nom du fichier");
+
+    const userId = req.user?.userId;
+    const classId = req.user?.classId;
+    if (!userId || !mongoose.Types.ObjectId.isValid(userId)) {
+      return res.status(400).json({ error: "Utilisateur invalide." });
+    }
+    if (!classId || !mongoose.Types.ObjectId.isValid(classId)) {
+      return res.status(400).json({ error: "Classe invalide." });
+    }
+
+    await UserFile.findOneAndUpdate(
+      { id_user: userId, id_classe: classId, id_card: cardId },
+      {
+        $push: {
+          filenames: { name: displayName.trim(), filename: safeFilename, date: new Date() },
+        },
+      },
+      { upsert: true }
+    );
+
+    res.json({ success: true });
+  } catch (err) {
+    console.error("POST /userfiles/confirm", err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/* Récupère les fichiers déposés par l'élève pour une carte */
+router.get("/userfiles", authenticate, async (req, res) => {
+  try {
+    const { cardId, repertoire, num } = req.query;
+
+    if (!cardId || !mongoose.Types.ObjectId.isValid(cardId)) {
+      return res.status(400).json({ error: "cardId invalide." });
+    }
+
+    const userId = req.user?.userId;
+    const classId = req.user?.classId;
+    if (!userId || !classId) return res.status(400).json({ error: "Utilisateur ou classe manquant." });
+
+    const doc = await UserFile.findOne({
+      id_user: userId,
+      id_classe: classId,
+      id_card: cardId,
+    }).lean();
+
+    if (!doc || !doc.filenames?.length) return res.json([]);
+
+    const { prefix } = await buildUserfilesFolderPrefixForUser({
+      user: req.user,
+      repertoire,
+      num,
+    });
+
+    const files = doc.filenames.map((f) => ({
+      name: f.name,
+      filename: f.filename,
+      date: f.date,
+      url: `https://storage.googleapis.com/${bucketName}/${prefix}${f.filename}`,
+    }));
+
+    res.json(files);
+  } catch (err) {
+    console.error("GET /userfiles", err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/* Supprime un fichier (GCS + MongoDB) */
+router.delete("/userfiles", authenticate, async (req, res) => {
+  try {
+    const { cardId, filename, repertoire, num } = req.body;
+
+    if (!cardId || !mongoose.Types.ObjectId.isValid(cardId)) {
+      return res.status(400).json({ error: "cardId invalide." });
+    }
+    const safeFilename = validateFileName(filename, "Nom du fichier");
+
+    const userId = req.user?.userId;
+    const classId = req.user?.classId;
+
+    const doc = await UserFile.findOne({ id_user: userId, id_classe: classId, id_card: cardId });
+    if (!doc) return res.status(404).json({ error: "Aucun fichier trouvé." });
+
+    const entry = doc.filenames.find((f) => f.filename === safeFilename);
+    if (!entry) return res.status(404).json({ error: "Fichier introuvable." });
+
+    const { prefix } = await buildUserfilesFolderPrefixForUser({ user: req.user, repertoire, num });
+    const fileRef = bucket.file(`${prefix}${safeFilename}`);
+    const [exists] = await fileRef.exists();
+    if (exists) await fileRef.delete();
+
+    await UserFile.updateOne(
+      { id_user: userId, id_classe: classId, id_card: cardId },
+      { $pull: { filenames: { filename: safeFilename } } }
+    );
+
+    await UserFile.deleteOne({
+      id_user: userId,
+      id_classe: classId,
+      id_card: cardId,
+      filenames: { $size: 0 },
+    });
+
+    res.json({ success: true });
+  } catch (err) {
+    console.error("DELETE /userfiles", err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/* Renomme l'affichage d'un fichier (MongoDB uniquement) */
+router.patch("/userfiles/rename", authenticate, async (req, res) => {
+  try {
+    const { cardId, filename, newDisplayName } = req.body;
+
+    if (!cardId || !mongoose.Types.ObjectId.isValid(cardId)) {
+      return res.status(400).json({ error: "cardId invalide." });
+    }
+    const safeFilename = validateFileName(filename, "Nom du fichier");
+    if (!newDisplayName || typeof newDisplayName !== "string" || !newDisplayName.trim()) {
+      return res.status(400).json({ error: "Nouveau nom manquant." });
+    }
+
+    const userId = req.user?.userId;
+    const classId = req.user?.classId;
+
+    const result = await UserFile.updateOne(
+      { id_user: userId, id_classe: classId, id_card: cardId, "filenames.filename": safeFilename },
+      { $set: { "filenames.$.name": newDisplayName.trim() } }
+    );
+
+    if (result.matchedCount === 0) return res.status(404).json({ error: "Fichier introuvable." });
+
+    res.json({ success: true });
+  } catch (err) {
+    console.error("PATCH /userfiles/rename", err);
+    res.status(500).json({ error: err.message });
+  }
+});
 
 module.exports = router;
