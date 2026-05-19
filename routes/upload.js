@@ -67,7 +67,12 @@ const allowedExtensions = [
 const allowedParents = ["ciel1","cloud","python"];
 const stripPrefix = (name = "") => {
   const parts = `${name}`.split("___");
-  return parts.length > 1 ? parts.slice(1).join("___") : name;
+  if (parts.length <= 1) return name;
+  const withoutUserPrefix = parts.slice(1).join("___");
+  if (withoutUserPrefix.startsWith("scan___")) {
+    return withoutUserPrefix.slice("scan___".length);
+  }
+  return withoutUserPrefix;
 };
 
 async function resolveUserFilePrefix(user) {
@@ -1112,6 +1117,75 @@ router.get("/dashboard", verifyToken, (req, res) => {
   res.json({ message: `Bienvenue ${req.user.prenom} ${req.user.nom}` });
 });
 /* FIN exemple route pour utiliser veriyToken */
+
+/* =========================================================
+   CLOUD — signed URL pour upload mobile (PDF scanné)
+   ========================================================= */
+
+router.post("/cloud/signed-url", authenticate, async (req, res) => {
+  try {
+    const { cardId, repertoire, num, filename } = req.body;
+
+    if (!cardId || !mongoose.Types.ObjectId.isValid(cardId)) {
+      return res.status(400).json({ error: "cardId invalide." });
+    }
+    const safeFilename = validateFileName(filename, "Nom du fichier");
+    if (path.extname(safeFilename).toLowerCase() !== ".pdf") {
+      return res.status(400).json({ error: "Seuls les fichiers PDF sont acceptés." });
+    }
+    if (safeFilename.toLowerCase().includes("scan___")) {
+      return res.status(400).json({ error: "Nom de fichier invalide." });
+    }
+
+    const card = await Card.findById(cardId).select("nbCloudFiles").lean();
+    const nbCloudFiles = typeof card?.nbCloudFiles === "number" ? card.nbCloudFiles : 0;
+    if (nbCloudFiles === 0) {
+      return res.status(403).json({ error: "Upload non autorisé pour cette carte." });
+    }
+
+    const cloudFolderPrefix = await buildCloudFolderPrefix({ user: req.user, repertoire, num });
+    const userPrefix = await resolveUserFilePrefix(req.user);
+    if (!userPrefix) {
+      return res.status(400).json({ error: "Prefix utilisateur manquant." });
+    }
+
+    // Compter les fichiers déjà uploadés par cet utilisateur dans ce dossier
+    const [gcsFiles] = await bucket.getFiles({
+      prefix: cloudFolderPrefix,
+      autoPaginate: false,
+      maxResults: 500,
+    });
+    const currentCount = gcsFiles.filter(
+      (f) => f?.name && !f.name.endsWith("/") &&
+        path.posix.basename(f.name).startsWith(`${userPrefix}___scan___`)
+    ).length;
+
+    if (currentCount >= nbCloudFiles) {
+      return res.status(403).json({ error: "Limite de fichiers cloud atteinte." });
+    }
+
+    const tagNumber = parseTagNumber(num);
+    const tagFolder = `tag${tagNumber}`;
+    const cloudParent = cloudFolderPrefix.replace(new RegExp(`/${tagFolder}/$`), "");
+    await createPublicFolder(cloudParent, tagFolder);
+
+    const gcsFilePath = `${cloudFolderPrefix}${userPrefix}___scan___${safeFilename}`;
+    const fileRef = bucket.file(gcsFilePath);
+    const [signedUrl] = await fileRef.getSignedUrl({
+      version: "v4",
+      action: "write",
+      expires: Date.now() + 15 * 60 * 1000,
+      contentType: "application/pdf",
+    });
+
+    const publicUrl = `https://storage.googleapis.com/${bucketName}/${gcsFilePath}`;
+    res.json({ signedUrl, publicUrl, filename: `${userPrefix}___scan___${safeFilename}` });
+  } catch (err) {
+    console.error("POST /upload/cloud/signed-url", err);
+    const status = err.message?.includes("invalide") || err.message?.includes("manquant") ? 400 : 500;
+    res.status(status).json({ error: err.message });
+  }
+});
 
 /* =========================================================
    USERFILES — dépôts élèves (cours manuscrits)
