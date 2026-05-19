@@ -9,6 +9,7 @@ const Classe = require("../models/classes");
 const Card = require("../models/cards");
 const Quizz = require("../models/quizzs");
 const Cloud = require("../models/cloud");
+const UserFile = require("../models/userfiles");
 const { getGcsEnvFolder } = require("../modules/gcsPaths");
 const yup = require("yup");
 const bcrypt = require("bcrypt");
@@ -109,6 +110,47 @@ const deleteUserCloudFilesFromGcs = async ({ classeId, userPrefix }) => {
         userFiles.map((f) =>
           f
             .delete({ ignoreNotFound: true })
+            .then(() => { deletedCount += 1; })
+            .catch(() => null)
+        )
+      );
+    }
+
+    pageToken = nextQuery?.pageToken;
+  } while (pageToken);
+
+  return { deleted: deletedCount };
+};
+
+const deleteUserFilesFromGcs = async ({ classeId, userPrefix }) => {
+  const trimmedPrefix = typeof userPrefix === "string" ? userPrefix.trim() : "";
+  if (!trimmedPrefix) return { deleted: 0 };
+
+  const classe = await Classe.findById(classeId).select("directoryname").lean();
+  const directoryname = sanitizeStorageSegment(classe?.directoryname || "");
+  if (!directoryname) return { deleted: 0 };
+
+  const classBasePrefix = `${`${gcsEnvFolder}`.replace(/^\/+|\/+$/g, "")}/${directoryname}/`;
+  const userfilesPath = `/userfiles/${trimmedPrefix}/`;
+  let deletedCount = 0;
+  let pageToken = undefined;
+
+  do {
+    const [files, nextQuery] = await bucket.getFiles({
+      prefix: classBasePrefix,
+      autoPaginate: false,
+      maxResults: 1000,
+      pageToken,
+    });
+
+    const toDelete = files.filter(
+      (f) => f?.name && !f.name.endsWith("/") && f.name.includes(userfilesPath)
+    );
+
+    if (toDelete.length) {
+      await Promise.allSettled(
+        toDelete.map((f) =>
+          f.delete({ ignoreNotFound: true })
             .then(() => { deletedCount += 1; })
             .catch(() => null)
         )
@@ -784,6 +826,8 @@ router.post("/leave-class", authenticate, async (req, res) => {
           return { deleted: primaryDeleted + legacyDeleted };
         })(),
         deleteUserCloudFilesFromGcs({ classeId: classObjectId, userPrefix }),
+        UserFile.deleteMany({ id_user: userObjectId, id_classe: classObjectId }),
+        deleteUserFilesFromGcs({ classeId: classObjectId, userPrefix }),
       ]);
 
       const quizzResult = settled[0];
@@ -917,8 +961,12 @@ router.post("/delete-account", authenticate, async (req, res) => {
       const settled = await Promise.allSettled([
         Quizz.deleteMany({ id_user: userObjectId }),
         Cloud.deleteMany({ id_user: userObjectId }),
+        UserFile.deleteMany({ id_user: userObjectId }),
         ...uniqueClassIds.map((classeId) =>
           deleteUserCloudFilesFromGcs({ classeId, userPrefix })
+        ),
+        ...uniqueClassIds.map((classeId) =>
+          deleteUserFilesFromGcs({ classeId, userPrefix })
         ),
       ]);
 

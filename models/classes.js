@@ -56,6 +56,7 @@ const classeSchema = new mongoose.Schema({
   codeExpires: { type: Date, default: null, select: false },
   students: { type: [studentSchema], default: [] },
   active: { type: Boolean, default: true },
+  nbUserFiles: { type: Number, default: 0 },
   exceptionvisible: {
     type: [{ type: mongoose.Schema.Types.ObjectId, ref: "User" }],
     default: [],

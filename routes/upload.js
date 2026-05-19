@@ -1147,6 +1147,18 @@ router.post("/userfiles/signed-url", authenticate, async (req, res) => {
       return res.status(400).json({ error: "Seuls les fichiers PDF sont acceptés." });
     }
 
+    const userId = req.user?.userId;
+    const classId = req.user?.classId;
+    const [classe, existingDoc] = await Promise.all([
+      Classe.findById(classId).select("nbUserFiles").lean(),
+      UserFile.findOne({ id_user: userId, id_classe: classId, id_card: cardId }).lean(),
+    ]);
+    const nbUserFiles = typeof classe?.nbUserFiles === "number" ? classe.nbUserFiles : 0;
+    const currentCount = existingDoc?.filenames?.length ?? 0;
+    if (nbUserFiles === 0 || currentCount >= nbUserFiles) {
+      return res.status(403).json({ error: "Limite de fichiers atteinte pour cette classe." });
+    }
+
     const { prefix, tagNumber } = await buildUserfilesFolderPrefixForUser({
       user: req.user,
       repertoire,
@@ -1227,13 +1239,14 @@ router.get("/userfiles", authenticate, async (req, res) => {
     const classId = req.user?.classId;
     if (!userId || !classId) return res.status(400).json({ error: "Utilisateur ou classe manquant." });
 
-    const doc = await UserFile.findOne({
-      id_user: userId,
-      id_classe: classId,
-      id_card: cardId,
-    }).lean();
+    const [doc, classe] = await Promise.all([
+      UserFile.findOne({ id_user: userId, id_classe: classId, id_card: cardId }).lean(),
+      Classe.findById(classId).select("nbUserFiles").lean(),
+    ]);
 
-    if (!doc || !doc.filenames?.length) return res.json([]);
+    const nbUserFiles = typeof classe?.nbUserFiles === "number" ? classe.nbUserFiles : 0;
+
+    if (!doc || !doc.filenames?.length) return res.json({ files: [], nbUserFiles });
 
     const { prefix } = await buildUserfilesFolderPrefixForUser({
       user: req.user,
@@ -1248,7 +1261,7 @@ router.get("/userfiles", authenticate, async (req, res) => {
       url: `https://storage.googleapis.com/${bucketName}/${prefix}${f.filename}`,
     }));
 
-    res.json(files);
+    res.json({ files, nbUserFiles });
   } catch (err) {
     console.error("GET /userfiles", err);
     res.status(500).json({ error: err.message });
