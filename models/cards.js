@@ -1,26 +1,26 @@
 const mongoose = require("mongoose");
 
 const hrefSchema = new mongoose.Schema({
-    txt: String,
-    href: String,
-    hover: { type: String, default: "" },
-    visible:Boolean,
+  txt: String,
+  href: String,
+  hover: { type: String, default: "" },
+  visible: Boolean,
 });
 
 const quizzSchema = new mongoose.Schema({
-    id: String,
-    question: String,
-    image: String,
-    options: [String],
-    correct: Number,
+  id: String,
+  question: String,
+  image: String,
+  options: [String],
+  correct: Number,
 });
 
 const flashSchema = new mongoose.Schema({
-    id: String,
-    question: String,
-    imquestion: String,
-    reponse: String,
-    imreponse: String,
+  id: String,
+  question: String,
+  imquestion: String,
+  reponse: String,
+  imreponse: String,
 });
 
 const cardSchema = new mongoose.Schema({
@@ -36,11 +36,13 @@ const cardSchema = new mongoose.Schema({
   flash: { type: [flashSchema], default: [] },
   video: { type: [hrefSchema], default: [] },
   nbUserFiles: { type: Number, default: 0 },
-  evalQuizz:String,
-  resultatQuizz:Boolean,
-  visible:Boolean,
-  order:Number,
-  classe:{ type: mongoose.Schema.Types.ObjectId, ref: "Classe" }
+  nbCloudFiles: { type: Number, default: 0 },
+
+  evalQuizz: String,
+  resultatQuizz: Boolean,
+  visible: Boolean,
+  order: Number,
+  classe: { type: mongoose.Schema.Types.ObjectId, ref: "Classe" },
 });
 
 cardSchema.index({ classe: 1, repertoire: 1, num: 1 }, { unique: true });

@@ -731,6 +731,27 @@ router.patch("/:id/cloud", requireCardScopedAdmin, async (req, res) => {
   }
 });
 
+router.patch("/:id/nbcloudfiles", requireCardScopedAdmin, async (req, res) => {
+  const { id } = req.params;
+  const raw = (req.body || {}).nbCloudFiles;
+  const value = Number(raw);
+  if (!Number.isFinite(value) || value < 0 || !Number.isInteger(value)) {
+    return res.status(400).json({ error: "Valeur nbCloudFiles invalide." });
+  }
+  try {
+    const updatedCard = await Card.findByIdAndUpdate(
+      id,
+      { nbCloudFiles: value },
+      { new: true, upsert: false }
+    ).lean();
+    if (!updatedCard) return res.status(404).json({ error: "Carte introuvable." });
+    res.json({ result: updatedCard });
+  } catch (err) {
+    console.error("PATCH /cards/:id/nbcloudfiles", err);
+    res.status(500).json({ error: "Erreur serveur." });
+  }
+});
+
 router.patch("/:id/nbuserfiles", requireCardScopedAdmin, async (req, res) => {
   const { id } = req.params;
   const raw = (req.body || {}).nbUserFiles;
