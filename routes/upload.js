@@ -12,6 +12,7 @@ const {
   requireScopedAdmin,
 } = require("../middlewares/auth");
 const Classe = require("../models/classes");
+const Card = require("../models/cards");
 const User = require("../models/users");
 const { getGcsEnvFolder, buildCardPrefix, buildUserfilesFolderPrefix } = require("../modules/gcsPaths");
 const UserFile = require("../models/userfiles");
@@ -1149,14 +1150,14 @@ router.post("/userfiles/signed-url", authenticate, async (req, res) => {
 
     const userId = req.user?.userId;
     const classId = req.user?.classId;
-    const [classe, existingDoc] = await Promise.all([
-      Classe.findById(classId).select("nbUserFiles").lean(),
+    const [card, existingDoc] = await Promise.all([
+      Card.findById(cardId).select("nbUserFiles").lean(),
       UserFile.findOne({ id_user: userId, id_classe: classId, id_card: cardId }).lean(),
     ]);
-    const nbUserFiles = typeof classe?.nbUserFiles === "number" ? classe.nbUserFiles : 0;
+    const nbUserFiles = typeof card?.nbUserFiles === "number" ? card.nbUserFiles : 0;
     const currentCount = existingDoc?.filenames?.length ?? 0;
     if (nbUserFiles === 0 || currentCount >= nbUserFiles) {
-      return res.status(403).json({ error: "Limite de fichiers atteinte pour cette classe." });
+      return res.status(403).json({ error: "Limite de fichiers atteinte pour cette carte." });
     }
 
     const { prefix, tagNumber } = await buildUserfilesFolderPrefixForUser({
@@ -1239,14 +1240,9 @@ router.get("/userfiles", authenticate, async (req, res) => {
     const classId = req.user?.classId;
     if (!userId || !classId) return res.status(400).json({ error: "Utilisateur ou classe manquant." });
 
-    const [doc, classe] = await Promise.all([
-      UserFile.findOne({ id_user: userId, id_classe: classId, id_card: cardId }).lean(),
-      Classe.findById(classId).select("nbUserFiles").lean(),
-    ]);
+    const doc = await UserFile.findOne({ id_user: userId, id_classe: classId, id_card: cardId }).lean();
 
-    const nbUserFiles = typeof classe?.nbUserFiles === "number" ? classe.nbUserFiles : 0;
-
-    if (!doc || !doc.filenames?.length) return res.json({ files: [], nbUserFiles });
+    if (!doc || !doc.filenames?.length) return res.json([]);
 
     const { prefix } = await buildUserfilesFolderPrefixForUser({
       user: req.user,
@@ -1261,7 +1257,7 @@ router.get("/userfiles", authenticate, async (req, res) => {
       url: `https://storage.googleapis.com/${bucketName}/${prefix}${f.filename}`,
     }));
 
-    res.json({ files, nbUserFiles });
+    res.json(files);
   } catch (err) {
     console.error("GET /userfiles", err);
     res.status(500).json({ error: err.message });

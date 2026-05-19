@@ -35,6 +35,7 @@ const cardSchema = new mongoose.Schema({
   quizz: { type: [quizzSchema], default: [] },
   flash: { type: [flashSchema], default: [] },
   video: { type: [hrefSchema], default: [] },
+  nbUserFiles: { type: Number, default: 0 },
   evalQuizz:String,
   resultatQuizz:Boolean,
   visible:Boolean,
