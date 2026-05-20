@@ -1757,6 +1757,8 @@ router.delete(
               return { deleted: primaryDeleted + legacyDeleted };
             })(),
             deleteUserCloudFilesFromGcs({ classeId: classObjectId, userPrefix }),
+            UserFile.deleteMany({ id_user: userObjectId, id_classe: classObjectId }),
+            deleteUserFilesFromGcs({ classeId: classObjectId, userPrefix }),
           ]);
 
           const quizzResult = settled[0];
